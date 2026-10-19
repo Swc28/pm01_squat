@@ -54,7 +54,7 @@ class CommandsCfg:
         asset_name="robot",
         period_s=4.0,
         base_height_stand=0.9,
-        base_height_squat=0.65, #delete: 0.75
+        base_height_squat=0.6,  # 与 commands.py 深蹲关键帧几何自洽（腿倾角 35.8°/33°）
         debug_vis=False,
     )
 
@@ -127,24 +127,55 @@ class EventCfg:
 @configclass
 class RewardsCfg:
     termination_penalty = RewTerm(func=mdp.is_terminated, weight=-200.0)
-    # 主任务：跟踪相位插值的关节角与基座高度（std 收紧提高跟踪精度）
-    track_joint_pos = RewTerm(
-        func=mdp.track_squat_joint_pos_exp, weight=1.0, params={"command_name": "squat_pose", "std": 0.2}
-    )
+    # ---- (1) 身高 z 上升/下降的大量奖励来源 ----
+    # 1a. 跟踪相位插值的基座高度目标（权重最高）：z 越接近目标奖励越大
     track_base_height = RewTerm(
-        func=mdp.track_squat_base_height_exp, weight=1.0, params={"command_name": "squat_pose", "std": 0.05}
+        func=mdp.track_squat_base_height_exp, weight=3.0, params={"command_name": "squat_pose", "std": 0.05}
     )
-    # 深蹲相位强制大腿/小腿倾角 ∈ [10°, 40°]
+    # 1b. 奖励 z 高度“变化过程”本身：跟踪期望竖直速度幅值
+    #     |dz/dt| = height_delta*(2π/period_s)*sqrt(phase*(1-phase))，中段最快、锚点为 0
+    base_height_velocity = RewTerm(
+        func=mdp.base_height_velocity_reward,
+        weight=2.0,
+        params={"command_name": "squat_pose", "period_s": 4.0, "height_delta": 0.30, "std": 0.05},
+    )
+    # 辅助：全关节相位轨迹跟踪（权重调低，避免稀释腿部/手臂专项项）
+    track_joint_pos = RewTerm(
+        func=mdp.track_squat_joint_pos_exp, weight=0.5, params={"command_name": "squat_pose", "std": 0.2}
+    )
+    # ---- (2) 腿按轨迹运动（髋/膝/踝 6 个 pitch 关节）----
+    track_leg_joint_traj = RewTerm(
+        func=mdp.track_leg_joint_traj_exp,
+        weight=2.0,
+        params={"command_name": "squat_pose", "std": 0.2},
+    )
+    # ---- (3) 蹲起时手臂约束（肩/肘 4 个 pitch 关节，摆臂防倾倒）----
+    track_arm_joint_pose = RewTerm(
+        func=mdp.track_arm_joint_pose_exp,
+        weight=1.2,
+        params={"command_name": "squat_pose", "std": 0.2},
+    )
+    # ---- (4) 身体倾斜度要求：躯干相对竖直方向倾角超过 25° 受罚 ----
+    torso_tilt = RewTerm(func=mdp.torso_tilt_penalty, weight=-1.5, params={"max_tilt_deg": 32.0})
+    # 蹲下相位限制大腿/小腿倾角窗口：上限 40° 覆盖深蹲关键帧（大腿 35.8°/小腿 33.0°）
     leg_angle_window = RewTerm(
         func=mdp.leg_angle_window_penalty,
         weight=-0.05,
-        params={"min_deg": 10.0, "max_deg": 40.0, "command_name": "squat_pose"}, #delete: 30.0
+        params={"min_deg": 10.0, "max_deg": 40.0, "command_name": "squat_pose"},
     )
-    # 原地稳定：身体保持直立、不平移、不晃动（防倾倒加强）
-    flat_orientation_l2 = RewTerm(func=mdp.flat_orientation_l2, weight=-2.0)
+    # 脚掌平放（防垫脚核心项）：世界系检测脚掌朝向，垫脚/脚跟抬起直接受罚
+    foot_flat = RewTerm(
+        func=mdp.foot_flat_pitch_penalty,
+        weight=-05,
+        params={"asset_cfg": SceneEntityCfg("robot", body_names=".*ANKLE.*")},
+    )
+    # 躯干直立（类人）：权重调低允许蹲下时躯干自然前倾（人蹲起躯干前倾 20~30°，
+    # 由髋屈曲代偿、降低踝背屈需求）；防真摔倒交给 bad_orientation 终止兜底
+ """   flat_orientation_l2 = RewTerm(func=mdp.flat_orientation_l2, weight=-1.0)""" """取消惩罚"""
     lin_vel_xy_l2 = RewTerm(func=mdp.lin_vel_xy_l2, weight=-0.5)
     ang_vel_xy_l2 = RewTerm(func=mdp.ang_vel_xy_l2, weight=-0.05)
-    # 非蹲关节保持默认姿态（髋roll/yaw、踝roll、腰、手臂、头）
+    # 非蹲关节保持默认姿态（髋roll/yaw、踝roll、腰、头）；
+    # 手臂由摆臂命令驱动（防倾倒），不再惩罚偏差
     joint_deviation_l1 = RewTerm(
         func=mdp.joint_deviation_l1,
         weight=-0.5,
@@ -156,8 +187,6 @@ class RewardsCfg:
                     ".*HIP_YAW.*",
                     ".*ANKLE_ROLL.*",
                     ".*WAIST.*",
-                    ".*SHOULDER.*",
-                    ".*ELBOW.*",
                     ".*HEAD.*",
                 ],
             )
@@ -178,7 +207,7 @@ class TerminationsCfg:
     )
     bad_orientation = DoneTerm(
         func=mdp.bad_orientation,
-        params={"limit_angle": 0.5},  # ~29°：身体倾斜超此角立即终止（防倾倒）
+        params={"limit_angle": 0.7},  # ~40°：允许类人前倾，只拦截真倾倒
     )
 
 

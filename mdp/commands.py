@@ -107,17 +107,28 @@ class SquatPoseCommandCfg(CommandTermCfg):
     base_height_stand: float = 0.9
     """站立姿态目标基座高度（米）。"""
 
-    base_height_squat: float = 0.82
-    """最深蹲姿目标基座高度（米），需与 squat_joint_pos 的蹲深匹配。
-    估算：0.9 × cos(大腿倾角)，大腿倾角25° → ≈0.816。"""
+    base_height_squat: float = 0.78
+    """最深蹲姿目标基座高度（米），需与 squat_joint_pos 的蹲深几何自洽。
+    计算（等效腿长 L1=0.3358, L2=0.3607, 踝高 0.1435, 髋偏移 0.0612）：
+    0.3358×cos(35.8°) + 0.3607×cos(33.0°) + 0.1435 + 0.0612 ≈ 0.780。
+    注意：蹲深 35.8° 时踝背屈需求 = |hip| ≈ 35.8°，PM01 踝为 Q25 低刚度电机
+    （刚度≈26.4，力矩52N·m）。若训练中出现垫脚（脚跟抬起/脚尖翘起），
+    优先加大 foot_flat 惩罚权重；仍不行再回退蹲深（同步改 base_height_squat）。"""
 
     squat_joint_pos: dict[str, float] = {
-        "J00_HIP_PITCH_L": -0.6109,   # -25°：大腿倾角 = |hip| = 25° ∈ (10°, 30°)  new:-35°
-        "J03_KNEE_PITCH_L": 1.2217,   # +50°：小腿倾角 = |hip+knee| = 25° ∈ (10°, 30°) new:+70°
-        "J04_ANKLE_PITCH_L": -0.6109, # -(hip+knee)，保持脚掌平放 new:-35°
-        "J06_HIP_PITCH_R": -0.6109,
-        "J09_KNEE_PITCH_R": 1.2217,
-        "J10_ANKLE_PITCH_R": -0.6109,
+        # 腿部深蹲（脚掌平放规则：ankle_pitch = -(hip_pitch + knee_pitch)）
+        "J00_HIP_PITCH_L": -0.625,    # -35.8°：大腿倾角=|hip|=35.8°
+        "J03_KNEE_PITCH_L": 1.201,    # +68.8°：小腿倾角=|hip+knee|=33.0°
+        "J04_ANKLE_PITCH_L": -0.576,  # -(hip+knee)=-33.0°，脚掌平放
+        "J06_HIP_PITCH_R": -0.625,
+        "J09_KNEE_PITCH_R": 1.201,
+        "J10_ANKLE_PITCH_R": -0.576,
+        # 摆臂防倾倒：下蹲时手臂前摆（肩 pitch 负=前摆）提供前向角动量，
+        # 抵消腿部前折的角动量；站起时回到默认姿态。肘部联动加屈。
+        "J13_SHOULDER_PITCH_L": -0.25,  # 0 → -14.3°，前摆
+        "J18_SHOULDER_PITCH_R": -0.25,
+        "J16_ELBOW_PITCH_L": -0.35,     # -0.25 → -20.1°，前摆时肘多屈 5.7°
+        "J21_ELBOW_PITCH_R": -0.35,
     }
     """蹲姿关键帧：关节名 → 目标角度（rad）。未列出的关节保持站立姿态。
     脚平放规则：ankle_pitch = -(hip_pitch + knee_pitch)。

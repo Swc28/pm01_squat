@@ -38,8 +38,8 @@ class PM01MyTaskPPORunnerCfg(RslRlOnPolicyRunnerCfg):
 @configclass
 class PM01SquatPPORunnerCfg(RslRlOnPolicyRunnerCfg):
     num_steps_per_env = 24
-    max_iterations = 10000
-    save_interval = 500
+    max_iterations = 20000
+    save_interval = 5000
     experiment_name = "mytask_pm01_squat"
     empirical_normalization = True
     policy = RslRlPpoActorCriticCfg(

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from typing import TYPE_CHECKING
 
 import torch
@@ -7,7 +8,7 @@ import torch
 from isaaclab.envs import mdp
 from isaaclab.managers import SceneEntityCfg
 from isaaclab.sensors import ContactSensor
-from isaaclab.utils.math import quat_apply_inverse, yaw_quat
+from isaaclab.utils.math import quat_apply, quat_apply_inverse, yaw_quat
 
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedRLEnv
@@ -225,3 +226,107 @@ def leg_angle_window_penalty(
     phase = env.command_manager.get_command(command_name)[:, -1]
     gate = torch.clamp((phase - 0.5) / 0.5, min=0.0)
     return viol.sum(dim=1) * gate
+
+
+def foot_flat_pitch_penalty(
+    env, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot", body_names=".*ANKLE.*")
+) -> torch.Tensor:
+    """惩罚脚掌不平放（垫脚/脚跟抬起），是防止垫脚的核心信号。
+
+    原理：垫脚 = 整只脚绕脚尖旋转，踝关节角可以保持不变，因此关节空间
+    约束检测不到垫脚；必须用世界系脚掌朝向。取脚 body 的世界四元数，
+    计算脚体局部 z 轴在世界系下偏离竖直方向的程度：tilt = 1 - cos(tilt角)，
+    平放时 ≈0，垫脚 δ° 时增量 ≈ 1-cos(δ)。
+    注：默认站立姿态下若脚体坐标系与竖直方向存在小的常数偏置（数度内），
+    只影响常数项不影响策略优化方向。
+    """
+    asset = env.scene[asset_cfg.name]
+    foot_quat_w = asset.data.body_quat_w[:, asset_cfg.body_ids]  # (N, 2, 4)
+    up = torch.tensor([0.0, 0.0, 1.0], device=asset.device).expand_as(foot_quat_w[..., :3])
+    foot_z_w = quat_apply(foot_quat_w.reshape(-1, 4), up.reshape(-1, 3)).reshape(foot_quat_w.shape[0], -1, 3)
+    tilt = 1.0 - foot_z_w[..., 2]  # (N, num_feet)
+    return tilt.mean(dim=1)
+
+
+def base_height_velocity_reward(
+    env, std: float = 0.05, period_s: float = 4.0, height_delta: float = 0.12, command_name: str = "squat_pose"
+) -> torch.Tensor:
+    """奖励基座 z 高度“上升/下降过程”本身，使竖直运动获得正向奖励（蹲起过程奖励）。
+
+    期望 z 速度幅值由余弦相位解析给出：
+        |dz/dt| = height_delta * (2*pi/period_s) * sqrt(phase*(1-phase))
+    峰值出现在 phase=0.5（蹲起中段，速度最大），两个锚点相位（0/1）处为 0。
+    只比较速度幅值（不判断方向），避免依赖相邻帧差分，故无状态、无方向误判。
+    说明：period_s / height_delta 应与此任务的 SquatPoseCommandCfg 保持一致，
+    不一致只会让奖励信号略有偏差，不会报错。
+    """
+    asset = env.scene["robot"]
+    command = env.command_manager.get_command(command_name)
+    num_joints = asset.data.joint_pos.shape[1]
+    phase = command[:, num_joints + 1]  # 命令布局 [关节目标, 目标高度, 相位]
+    z_vel = torch.abs(asset.data.root_lin_vel_b[:, 2])  # 机身系竖直速度
+    expected = height_delta * (2.0 * math.pi / period_s) * torch.sqrt(
+        torch.clamp(phase * (1.0 - phase), min=0.0)
+    )
+    return torch.exp(-torch.square(z_vel - expected) / std**2)
+
+
+def track_leg_joint_traj_exp(
+    env, std: float = 0.2, command_name: str = "squat_pose"
+) -> torch.Tensor:
+    """跟踪腿部 6 个 pitch 关节（髋/膝/踝 × 左右）的余弦相位轨迹。
+
+    命令向量的关节段与 articulation 关节顺序一致（由 SquatPoseCommand 按
+    robot.data.default_joint_pos 顺序构造），因此直接用关节索引在同一顺序下对齐。
+    """
+    asset = env.scene["robot"]
+    # 顺序：左髋/左膝/左踝/右髋/右膝/右踝（与 find_joints 传入顺序一致）
+    leg_names = [
+        "J00_HIP_PITCH_L", "J03_KNEE_PITCH_L", "J04_ANKLE_PITCH_L",
+        "J06_HIP_PITCH_R", "J09_KNEE_PITCH_R", "J10_ANKLE_PITCH_R",
+    ]
+    leg_ids, _ = asset.find_joints(leg_names, preserve_order=True)
+    command = env.command_manager.get_command(command_name)
+    num_joints = asset.data.joint_pos.shape[1]
+    targets = command[:, :num_joints][:, leg_ids]
+    error = torch.sum(torch.square(targets - asset.data.joint_pos[:, leg_ids]), dim=1)
+    return torch.exp(-error / std**2)
+
+
+def track_arm_joint_pose_exp(
+    env, std: float = 0.3, command_name: str = "squat_pose"
+) -> torch.Tensor:
+    """蹲起时手臂姿态约束：跟踪肩/肘 pitch 关键帧目标（摆臂防倾倒）。
+
+    手臂目标由 squat_joint_pos 关键帧给出（下蹲前摆、站起回位），
+    单独成项可避免被全关节平均项稀释。
+    """
+    asset = env.scene["robot"]
+    arm_names = [
+        "J13_SHOULDER_PITCH_L", "J16_ELBOW_PITCH_L",
+        "J18_SHOULDER_PITCH_R", "J21_ELBOW_PITCH_R",
+    ]
+    arm_ids, _ = asset.find_joints(arm_names, preserve_order=True)
+    command = env.command_manager.get_command(command_name)
+    num_joints = asset.data.joint_pos.shape[1]
+    targets = command[:, :num_joints][:, arm_ids]
+    error = torch.sum(torch.square(targets - asset.data.joint_pos[:, arm_ids]), dim=1)
+    return torch.exp(-error / std**2)
+
+
+def torso_tilt_penalty(
+    env, max_tilt_deg: float = 25.0, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot")
+) -> torch.Tensor:
+    """身体倾斜度要求：惩罚躯干相对竖直方向倾斜超过 max_tilt_deg 的部分（度）。
+
+    用 root 机身 z 轴在世界系下的仰角衡量合成倾角（roll+pitch），站立与蹲下均生效
+    （统一阈值，比相位门控更直接满足“倾斜度要求”）。
+    注意：max_tilt_deg 必须大于蹲起时的类人前倾角（约 20~30°），
+    否则会与“允许自然前倾”的设计相冲突。
+    """
+    asset = env.scene[asset_cfg.name]
+    up_local = torch.tensor([0.0, 0.0, 1.0], device=asset.device).expand(env.num_envs, 3)
+    up_w = quat_apply(asset.data.root_quat_w, up_local)      # (N, 3)
+    cos_tilt = torch.clamp(up_w[:, 2], -1.0, 1.0)            # (N,)
+    tilt_deg = torch.rad2deg(torch.acos(cos_tilt))           # (N,)
+    return torch.clamp(tilt_deg - max_tilt_deg, min=0.0)      # (N,)

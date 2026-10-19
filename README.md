@@ -136,8 +136,10 @@ python scripts/velocity/train.py --task Isaac-Squat-MyTask-PM01-v0 --headless --
 python -m tensorboard.main --logdir logs/rsl_rl/mytask_pm01_squat
 
 # 演示（注意：本仓库不生成 model.pt，checkpoint 用编号最大的 model_XXXX.pt）
+# 必须加 --enable_cameras：Play 配置内置 TiledCamera 离屏相机（录视频用），
+# 不加会报 "A camera was spawned without the --enable_cameras flag"
 python scripts/velocity/play.py --task Isaac-Squat-MyTask-PM01-Play-v0 \
-    --num_envs 1 --load_run <时间戳目录> --checkpoint model_XXXX.pt
+    --enable_cameras --num_envs 1 --load_run <时间戳目录> --checkpoint model_XXXX.pt
 
 # GUI 闪退/黑屏（无显示服务器）→ 离屏相机录视频（推荐）
 # 官方 --video 走视口截图，headless 下是黑帧；本命令用 Play 场景内的
@@ -155,6 +157,8 @@ python -m engineai_rl_lab.tasks.mytask.record_video \
 | 2026-10-05 | weight | 1.0 | 1.5 | 奖励权重提升 |
 | 2026-10-05 | std | 0.5 | 0.35 | 降低探索噪声 |
 | 2026-10-06 | 新增蹲起任务 | — | `Isaac-Squat-MyTask-PM01-v0/-Play-v0` | 关键帧跟踪，无需数据集；新增 mdp/commands.py、squat_env_cfg.py、record_video.py |
+| 2026-10-16 | 深蹲+摆臂 | 蹲姿 hip -18°/膝 36°/踝 -18°，base_height_squat 0.65，无摆臂；腿角窗口上限 30°；手臂纳入 joint_deviation 惩罚；PPO 10000 轮/每 500 保存 | 蹲姿 hip -35.8°/膝 68.8°/踝 -33°，base_height_squat 0.78，摆臂肩 -14.3°+肘 -20.1°；腿角窗口上限 40°；解除手臂偏差惩罚；PPO 20000 轮/每 5000 保存 | 深蹲 12cm+防倾倒摆臂（对齐 squat_motion CSV 参考动作）；episode 20s=5 周期不变；10-18 发现被回退，同日重新应用 |
+| 2026-10-18 | 蹲起 GUI 演示命令修正 | 无 --enable_cameras | GUI 演示必须加 --enable_cameras | Play 配置内置 TiledCamera，不加报 "A camera was spawned without the --enable_cameras flag" |
 
 ## 维护约定
 

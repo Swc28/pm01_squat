@@ -39,8 +39,8 @@ class PM01MyTaskPPORunnerCfg(RslRlOnPolicyRunnerCfg):
 class PM01SquatPPORunnerCfg(RslRlOnPolicyRunnerCfg):
     num_steps_per_env = 24
     max_iterations = 15000
-    # 5000→1000：崩溃时最多丢 1000 轮（曾因崩溃丢失 3100+ 轮训练）
-    save_interval = 1000
+    # 每 3000 轮存点：崩溃时最多丢 3000 轮（曾因 save_interval=5000 崩溃丢 3100+ 轮）
+    save_interval = 3000
     experiment_name = "mytask_pm01_squat"
     empirical_normalization = True
     policy = RslRlPpoActorCriticCfg(

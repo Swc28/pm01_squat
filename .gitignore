@@ -1,0 +1,13 @@
+# Python 缓存
+__pycache__/
+*.py[cod]
+
+# 训练/仿真产物
+logs/
+videos/
+outputs/
+
+# 系统与编辑器
+.DS_Store
+.idea/
+.vscode/

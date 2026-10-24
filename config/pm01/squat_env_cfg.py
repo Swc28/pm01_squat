@@ -52,6 +52,10 @@ class PM01MyTaskSquatEnvCfg(SquatEnvCfg):
             ".*KNEE_PITCH.*": 0.5,
             ".*ANKLE.*": 0.5,
         }
+        # 关节位置目标限幅（单位：rad，作用于 scale*action+offset 后的绝对目标）：
+        # 防极端动作把物理状态打爆（曾导致 value loss = inf、log_std = NaN 崩溃）。
+        # 蹲姿目标最大约 1.12 rad（膝），±1.5 rad 不限制正常蹲起
+        self.actions.joint_pos.clip = {".*": (-1.5, 1.5)}
 
         self.terminations.base_contact.params["sensor_cfg"].body_names = "LINK_BASE"
 

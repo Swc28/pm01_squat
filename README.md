@@ -159,6 +159,8 @@ python -m engineai_rl_lab.tasks.mytask.record_video \
 | 2026-10-06 | 新增蹲起任务 | — | `Isaac-Squat-MyTask-PM01-v0/-Play-v0` | 关键帧跟踪，无需数据集；新增 mdp/commands.py、squat_env_cfg.py、record_video.py |
 | 2026-10-16 | 深蹲+摆臂 | 蹲姿 hip -18°/膝 36°/踝 -18°，base_height_squat 0.65，无摆臂；腿角窗口上限 30°；手臂纳入 joint_deviation 惩罚；PPO 10000 轮/每 500 保存 | 蹲姿 hip -35.8°/膝 68.8°/踝 -33°，base_height_squat 0.78，摆臂肩 -14.3°+肘 -20.1°；腿角窗口上限 40°；解除手臂偏差惩罚；PPO 20000 轮/每 5000 保存 | 深蹲 12cm+防倾倒摆臂（对齐 squat_motion CSV 参考动作）；episode 20s=5 周期不变；10-18 发现被回退，同日重新应用 |
 | 2026-10-18 | 蹲起 GUI 演示命令修正 | 无 --enable_cameras | GUI 演示必须加 --enable_cameras | Play 配置内置 TiledCamera，不加报 "A camera was spawned without the --enable_cameras flag" |
+| 2026-10-23 | 蹲起手臂固定 + 训练轮次 | 摆臂关键帧（肩 -17.2°/肘 -22.9°）+ `track_arm_joint_pose`(1.2) + 手臂仅约束 ROLL/YAW；PPO 20000 轮/每 5000 存 | 移除摆臂关键帧与手臂跟踪奖励，`.*SHOULDER.*`/`.*ELBOW.*` 全部纳入 `joint_deviation_l1` 保持默认姿态；PPO 15000 轮/每 5000 存 | 消除手臂抽搐；腿部 32° 蹲深不变，仅保留深蹲/站立腿部动作 |
+| 2026-10-24 | 蹲起训练发散修复（value loss=inf / log_std=NaN 崩溃） | 关节跟踪 std：腿 0.1、全关节 0.2（奖励恒 0 无梯度）；`track_base_height` 3.0；PPO `init_noise_std=1.0`、`entropy_coef=0.01`、`lr=1e-3`、`save_interval=5000`；无关节目标限幅 | 腿 std→0.4、全关节 std→0.4、腿权重 2.0→3.0；`track_base_height` 3.0→1.5；PPO `init_noise_std=0.5`、`entropy_coef=0.003`、`lr=5e-4`、`save_interval=1000`；`actions.joint_pos.clip={".*": (-1.5, 1.5)}` | 崩溃根因：腿部跟踪奖励恒 0 + 探索噪声过大 → 极端动作 → return 溢出 → 策略 NaN；崩溃时无 checkpoint 丢 3100+ 轮 |
 
 ## 维护约定
 

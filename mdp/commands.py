@@ -122,12 +122,9 @@ class SquatPoseCommandCfg(CommandTermCfg):
         "J06_HIP_PITCH_R": -0.5585,
         "J09_KNEE_PITCH_R": 1.1170,
         "J10_ANKLE_PITCH_R": -0.5585,
-        # 摆臂防倾倒：下蹲时手臂前摆（肩 pitch 负=前摆）提供前向角动量，
-        # 抵消腿部前折的角动量；站起时回到默认姿态。肘部联动加屈。
-        "J13_SHOULDER_PITCH_L": -0.30,  # 0 → -17.2°，前摆（深蹲摆幅加大）
-        "J18_SHOULDER_PITCH_R": -0.30,
-        "J16_ELBOW_PITCH_L": -0.40,     # -0.25 → -22.9°，前摆时肘多屈 8.6°
-        "J21_ELBOW_PITCH_R": -0.40,
+        # 手臂不再参与蹲起：肩/肘 pitch 不下发任何目标 → 全程保持站立默认姿态，
+        # 避免摆臂目标与探索噪声耦合导致手臂抽搐；手臂恒定由
+        # joint_deviation_l1（含 SHOULDER_PITCH/ELBOW_PITCH）约束住。
     }
     """蹲姿关键帧：关节名 → 目标角度（rad）。未列出的关节保持站立姿态。
     脚平放规则：ankle_pitch = -(hip_pitch + knee_pitch)。

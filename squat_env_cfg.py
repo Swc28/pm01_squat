@@ -128,9 +128,11 @@ class EventCfg:
 class RewardsCfg:
     termination_penalty = RewTerm(func=mdp.is_terminated, weight=-200.0)
     # ---- (1) 身高 z 上升/下降的大量奖励来源 ----
-    # 1a. 跟踪相位插值的基座高度目标（权重最高）：z 越接近目标奖励越大
+    # 1a. 跟踪相位插值的基座高度目标：z 越接近目标奖励越大
+    # 权重 3.0→1.5：原权重过高，策略只靠“屈膝弹跳”改高度、完全不做关节轨迹跟踪，
+    # 形成退化策略；降低后让位给腿部关节跟踪项
     track_base_height = RewTerm(
-        func=mdp.track_squat_base_height_exp, weight=3.0, params={"command_name": "squat_pose", "std": 0.05}
+        func=mdp.track_squat_base_height_exp, weight=1.5, params={"command_name": "squat_pose", "std": 0.05}
     )
     # 1b. 奖励 z 高度“变化过程”本身：跟踪期望竖直速度幅值
     #     |dz/dt| = height_delta*(2π/period_s)*sqrt(phase*(1-phase))，中段最快、锚点为 0
@@ -139,22 +141,20 @@ class RewardsCfg:
         weight=2.0,
         params={"command_name": "squat_pose", "period_s": 4.0, "height_delta": 0.105, "std": 0.05},
     )
-    # 辅助：全关节相位轨迹跟踪（权重调低，避免稀释腿部/手臂专项项）
+    # 辅助：全关节相位轨迹跟踪（权重调低，避免稀释腿部专项项）
+    # std 0.2→0.4：原值过紧，24 关节求和后 exp 饱和，奖励恒为 0，等于没有该项
     track_joint_pos = RewTerm(
-        func=mdp.track_squat_joint_pos_exp, weight=0.5, params={"command_name": "squat_pose", "std": 0.2}
+        func=mdp.track_squat_joint_pos_exp, weight=0.5, params={"command_name": "squat_pose", "std": 0.4}
     )
     # ---- (2) 腿按轨迹运动（髋/膝/踝 6 个 pitch 关节）----
+    # weight 2.0→3.0 作为主导姿态项；std 0.1→0.4：原值下 6 关节误差≈0.5 时
+    # exp(-0.5/0.01)≈e^-50，奖励恒 0，策略得不到任何关节角梯度
     track_leg_joint_traj = RewTerm(
         func=mdp.track_leg_joint_traj_exp,
-        weight=2.0,
-        params={"command_name": "squat_pose", "std": 0.1},
+        weight=2.0,  # weight暂时保持2.0，单独验证std的影响
+        params={"command_name": "squat_pose", "std": 0.4},
     )
-    # ---- (3) 蹲起时手臂约束（肩/肘 4 个 pitch 关节，摆臂防倾倒）----
-    track_arm_joint_pose = RewTerm(
-        func=mdp.track_arm_joint_pose_exp,
-        weight=1.2,
-        params={"command_name": "squat_pose", "std": 0.2},
-    )
+    # ---- (3) 手臂已固定（不参与蹲起），不再有手臂轨迹跟踪奖励 ----
     # ---- (4) 身体倾斜度要求：躯干相对竖直方向倾角超过 25° 受罚 ----
     torso_tilt = RewTerm(func=mdp.torso_tilt_penalty, weight=-1.5, params={"max_tilt_deg": 25.0})
     # 蹲下相位限制大腿/小腿倾角窗口：keep ∈ (10°, 38°)（对齐关键帧 32°）
@@ -177,8 +177,8 @@ class RewardsCfg:
     lin_vel_xy_l2 = RewTerm(func=mdp.lin_vel_xy_l2, weight=-0.5)
     ang_vel_xy_l2 = RewTerm(func=mdp.ang_vel_xy_l2, weight=-0.05)
     # 非蹲关节保持默认姿态（髋roll/yaw、踝roll、腰、头）；
-    # 手臂：PITCH 关节由摆臂命令驱动（不惩罚），但肩 ROLL/YAW、肘 YAW 无命令 → 必须惩罚，
-    # 否则这 6 个自由度没有任何约束，训练后会出现“手臂乱转”
+    # 手臂全部关节（肩/肘 PITCH+ROLL+YAW）无命令驱动 → 全部纳入本惩罚，
+    # 这是消除手臂抽搐的关键项：不加则手臂自由度无任何约束
     joint_deviation_l1 = RewTerm(
         func=mdp.joint_deviation_l1,
         weight=-0.5,
@@ -189,9 +189,8 @@ class RewardsCfg:
                     ".*HIP_ROLL.*",
                     ".*HIP_YAW.*",
                     ".*ANKLE_ROLL.*",
-                    ".*SHOULDER_ROLL.*",
-                    ".*SHOULDER_YAW.*",
-                    ".*ELBOW_YAW.*",
+                    ".*SHOULDER.*",
+                    ".*ELBOW.*",
                     ".*WAIST.*",
                     ".*HEAD.*",
                 ],

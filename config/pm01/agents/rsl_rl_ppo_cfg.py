@@ -6,8 +6,8 @@ from isaaclab_rl.rsl_rl import RslRlOnPolicyRunnerCfg, RslRlPpoActorCriticCfg, R
 class PM01MyTaskPPORunnerCfg(RslRlOnPolicyRunnerCfg):
     num_steps_per_env = 24
     # 行走任务：固定 0.5 m/s 直行；新增步态/摆臂参考奖励，需在原 5000 轮基础上继续适配
-    max_iterations = 8000
-    save_interval = 1000
+    max_iterations = 10000
+    save_interval = 5000
     experiment_name = "mytask_pm01"
     empirical_normalization = True
     policy = RslRlPpoActorCriticCfg(

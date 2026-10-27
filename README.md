@@ -90,15 +90,15 @@ phase = 0.5 * (1 - cos(2π·t / period_s))       # 0 = 站立，1 = 最深蹲
 
 `config/pm01/agents/rsl_rl_ppo_cfg.py` 中两套配置：
 
-| 超参 | 蹲起任务（当前主用） | 速度任务 |
+| 超参 | 蹲起任务 | 速度任务 |
 |---|---|---|
-| `max_iterations` | **15000** | 5000 |
-| `save_interval` | **3000** | 1000 |
+| `max_iterations` | 15000 | **10000** |
+| `save_interval` | 3000 | **5000** |
 | `num_steps_per_env` | 24 | 24 |
 | `experiment_name` | `mytask_pm01_squat` | `mytask_pm01` |
-| `init_noise_std` | **0.5** | 1.0 |
-| `entropy_coef` | **0.003** | 0.01 |
-| `learning_rate` | **5.0e-4**（adaptive） | 1.0e-3（adaptive） |
+| `init_noise_std` | 0.5 | **0.5** |
+| `entropy_coef` | 0.003 | **0.003** |
+| `learning_rate` | 5.0e-4（adaptive） | **5.0e-4**（adaptive） |
 | `clip_param` / `desired_kl` | 0.2 / 0.01 | 0.2 / 0.01 |
 | `gamma` / `lam` | 0.99 / 0.95 | 0.99 / 0.95 |
 | `num_learning_epochs` / `num_mini_batches` | 5 / 4 | 5 / 4 |
@@ -108,6 +108,8 @@ phase = 0.5 * (1 - cos(2π·t / period_s))       # 0 = 站立，1 = 最深蹲
 
 15000 轮 + 每 3000 轮存点的产物：`model_0.pt`、`model_3000.pt`、`model_6000.pt`、
 `model_9000.pt`、`model_12000.pt`，最终 `model_14999.pt`。
+
+速度任务 10000 轮 + 每 5000 轮存点的产物：`model_0.pt`、`model_5000.pt`，最终 `model_9999.pt`。
 
 ## 三、目录结构
 
@@ -228,17 +230,45 @@ python -m engineai_rl_lab.tasks.mytask.record_video \
 | 防倾倒 | 终止 `base_contact`/`bad_orientation`/`root_height_below` + `push_robot` 抗扰（±0.3 m/s，8~12 s 一次） | 同上 |
 | 动作安全 | `joint_pos.clip={".*": (-1.5, 1.5)}` rad | 同上 |
 
-奖励设计（自定义函数见 `mdp/rewards.py`，挂载于 `velocity_env_cfg.py`）：
+奖励设计（自定义函数见 `mdp/rewards.py`、`mdp/gait.py`，挂载于 `velocity_env_cfg.py`，
+以下权重/参数为 `flat_env_cfg.py` 覆盖后的实际生效值）：
 
-| 奖励项 | 权重 | 阈值 | 作用 |
+| 奖励项 | 权重 | 关键参数 | 作用 |
 |---|---|---|---|
-| `track_lin_vel_xy_exp` | 1.5 | std 0.35 | 主任务：跟踪线速度指令 |
-| `hip_extension_penalty` | -0.5 | 0.3 | 惩罚髋关节过度后伸 |
-| `hip_flexion_reward` | +0.5 | 0.1~0.5 | 鼓励主动向前迈步 |
-| `hip_symmetry_penalty` | -0.5 | 0.3 | 惩罚左右髋不对称 |
-| `knee_bend_penalty` | -0.8 | 1.0 | 抑制膝盖过度弯曲 |
-| `shoulder_flexion_penalty` | -0.5 | 0.3 | 抑制手臂摆动过大 |
-| `feet_air_time` | 0.75 | 0.4 | 鼓励正常步态周期 |
+| `termination_penalty` | -200.0 | — | 摔倒 / 基座触地终止 |
+| `track_lin_vel_xy_exp` | 1.5 | std 0.35 | 主任务：跟踪 0.5 m/s 线速度指令 |
+| `track_ang_vel_z_exp` | 1.0 | std 0.5 | 角速度跟踪（指令恒为 0，等价于“不许转”） |
+| `gait_leg_tracking` | 1.2 | std 0.5、`period_s=0.9` | **核心项**：跟踪解析步态的髋/膝/踝 6 关节参考角，抑制“蹭地前进” |
+| `gait_arm_tracking` | 0.5 | std 0.4、`period_s=0.9` | 跟踪与腿同相位反相的摆臂参考（左右肩 + 左右肘） |
+| `feet_air_time` | 0.75 | 阈值 0.4 s | 鼓励正常交替步态周期 |
+| `feet_slide` | -1.0 | — | 惩罚支撑期足底滑动（与步态跟踪同量级） |
+| `both_feet_airborne` | -0.5 | — | 禁止双脚同时离地（防“跳跃式”前进） |
+| `flat_orientation_l2` | -2.0 | — | 躯干保持直立 |
+| `base_height_l2` | -1.5 | 目标 0.87 m | 保持基座高度 |
+| `lin_vel_z_l2` | -0.5 | — | 抑制竖直方向弹跳 |
+| `knee_bend` | -0.5 | 阈值 1.2 rad | 抑制膝盖过度弯曲（阈值已放宽到不干扰摆动期抬腿） |
+| `hip_extension` | -0.3 | 阈值 0.5 rad | 抑制髋关节过度后伸（阈值已放宽到不压制正常迈步） |
+| `dof_pos_limits` | -1.0 | 髋/膝/踝 | 关节软限位惩罚（全腿，不只踝） |
+| `joint_deviation_hip` | -0.1 | 髋 yaw/roll | 髋侧向保持默认 |
+| `joint_deviation_arms` | -0.1 | 肩/肘 | 弱约束手臂，给摆臂留空间 |
+| `joint_deviation_torso` | -0.1 | 腰/头 | 腰、头保持默认 |
+| `stand_still` | -0.5 | `command_name=base_velocity` | 指令接近 0 时惩罚乱动（直行指令下基本不触发） |
+| `action_rate_l2` | -0.005 | — | 动作平滑 |
+| `dof_torques_l2` | -2.0e-6 | 髋/膝/踝 | 能耗 |
+| `dof_acc_l2` | -1.0e-7 | 髋/膝 | 关节加速度平滑 |
+
+已从奖励配置中移除的旧项：`hip_flexion_reward`（奖励髋后伸）、`hip_symmetry_penalty`（惩罚左右腿不对称）、
+`shoulder_flexion_penalty`（压制摆臂）——三者都与左右交替步态直接冲突，改由
+`gait_leg_tracking` / `gait_arm_tracking` 统一约束。三个函数仍保留在 `mdp/rewards.py`，只是当前未挂载。
+
+步态参考要点（`mdp/gait.py`）：
+
+- 相位由 episode 时间推导（`episode_length_buf × step_dt / period_s`），左右腿相差 0.5 周期，
+  **不进入观测**，因此观测维度不变，可继承旧检查点
+- 足端轨迹用 2-link IK（大腿 0.339 m、小腿 0.364 m）解出髋/膝/踝 pitch 目标，
+  支撑期 0.6 周期、抬脚 0.04 m；步幅 `A = 0.5·v·0.6·T` 随命令速度自适应，
+  保证支撑脚相对机身速度恰为 −v
+- 默认站姿下参考增量恒为 0，参考角经关节软限位裁剪后输出
 
 ```bash
 # 训练
@@ -264,6 +294,8 @@ python scripts/velocity/play.py --task Isaac-Velocity-MyTask-PM01-Play-v0 \
 | 2026-10-24 | 训练轮次与保存间隔调整 | 15000 轮 / 每 1000 轮 | 15000 轮 / **每 3000 轮** | 平衡磁盘占用与崩溃损失；最终产物 `model_14999.pt` |
 | 2026-10-24 | 腿轨迹奖励权重回退 | `track_leg_joint_traj` 3.0 | **2.0** | 单独验证放宽 std 的影响，不改权重以隔离变量 |
 | 2026-10-27 | 行走任务参数（0.5 m/s 直行 20 m） | 速度 `(0,1.0)`/侧移 ±0.3/转向 ±0.8/heading 开启/单局 20 s/`push_robot=None`；姿态权重 -1.0；PPO 3000 轮/每 500 存 | `lin_vel_x=(0.5,0.5)`、`lin_vel_y=0`、`ang_vel_z=0`、`heading_command=False`、`rel_standing_envs=0`、单局 45 s；`flat_orientation_l2=-2.0`、`base_height_l2=-1.5`、`joint_pos.clip=±1.5`；启用 `push_robot` ±0.3 m/s（8~12 s）；PPO 5000 轮/每 1000 存 | 仅改行走专属文件（`flat_env_cfg.py`、`PM01MyTaskPPORunnerCfg`）；蹲起配置与 `mdp/` 共享函数保持不变 |
+| 2026-10-27 | 行走任务 PPO 轮次 | 8000 轮 / 每 1000 轮存点 | **10000 轮 / 每 5000 轮存点** | 产物 `model_0.pt`、`model_5000.pt`、`model_9999.pt`；仅改 `PM01MyTaskPPORunnerCfg` |
+| 2026-10-27 | 行走任务步态跟踪改造 | 无步态参考；`feet_slide=-0.3`、`dof_pos_limits` 仅踝、`joint_deviation_arms=-0.5`、`knee_bend` 阈值 1.0/-0.8、`hip_extension` 阈值 0.3/-0.5；`hip_flexion_reward`(0.5)、`hip_symmetry_penalty`(-0.5) 挂载中；PPO `init_noise_std=1.0`、`entropy_coef=0.01`、`lr=1e-3` | 新增 `mdp/gait.py` 解析步态 + `gait_leg_tracking`(1.2, std 0.5)、`gait_arm_tracking`(0.5, std 0.4)；`feet_slide=-1.0`、`dof_pos_limits` 扩至髋/膝/踝、`joint_deviation_arms=-0.1`、`knee_bend` 1.2/-0.5、`hip_extension` 0.5/-0.3；移除 `hip_flexion`/`hip_symmetry` 挂载；PPO `init_noise_std=0.5`、`entropy_coef=0.003`、`lr=5e-4` | 目标：抑制足底滑动、形成左右交替步态与自然摆臂；相位不入观测，观测维度不变可继承旧检查点 |
 
 ## 九、维护约定
 

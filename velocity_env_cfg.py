@@ -200,15 +200,19 @@ class RewardsCfg:
         },
     )
     feet_slide = RewTerm(
+        # -0.3 → -1.0：滑动是"靠足底蹭地前进"的主因，需与步态跟踪奖励同量级才能抑制
         func=mdp.feet_slide,
-        weight=-0.3,
+        weight=-1.0,
         params={
             "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*ANKLE.*"),
             "asset_cfg": SceneEntityCfg("robot", body_names=".*ANKLE.*"),
         },
     )
     dof_pos_limits = RewTerm(
-        func=mdp.joint_pos_limits, weight=-1.0, params={"asset_cfg": SceneEntityCfg("robot", joint_names=".*ANKLE.*")}
+        # 仅踝 → 髋/膝/踝：摆动期膝接近伸直（软下限 -0.21），需对整条腿做限位惩罚
+        func=mdp.joint_pos_limits,
+        weight=-1.0,
+        params={"asset_cfg": SceneEntityCfg("robot", joint_names=[".*HIP.*", ".*KNEE.*", ".*ANKLE.*"])},
     )
     joint_deviation_hip = RewTerm(
         func=mdp.joint_deviation_l1,
@@ -216,8 +220,9 @@ class RewardsCfg:
         params={"asset_cfg": SceneEntityCfg("robot", joint_names=[".*HIP_YAW.*", ".*HIP_ROLL.*"])},
     )
     joint_deviation_arms = RewTerm(
+        # -0.5 → -0.1：原权重把手臂强拉回默认姿态，与"摆臂"目标直接冲突
         func=mdp.joint_deviation_l1,
-        weight=-0.5,
+        weight=-0.1,
         params={"asset_cfg": SceneEntityCfg("robot", joint_names=[".*SHOULDER.*", ".*ELBOW.*"])},
     )
     joint_deviation_torso = RewTerm(
@@ -247,24 +252,28 @@ class RewardsCfg:
         params={"target_height": 0.87},
     )
     knee_bend = RewTerm(
+        # 阈值 1.0 → 1.2：步态摆动期膝屈约 0.85 rad，原阈值会惩罚正常抬腿
         func=mdp.knee_bend_penalty,
-        weight=-0.8,
-        params={"threshold": 1.0, "asset_cfg": SceneEntityCfg("robot")},
+        weight=-0.5,
+        params={"threshold": 1.2, "asset_cfg": SceneEntityCfg("robot")},
     )
     hip_extension = RewTerm(
+        # 阈值 0.3 → 0.5：参考步态前摆髋约 0.27 rad，原阈值会压制正常迈步
         func=mdp.hip_extension_penalty,
-        weight=-0.5,
-        params={"threshold": 0.3, "asset_cfg": SceneEntityCfg("robot")},
+        weight=-0.3,
+        params={"threshold": 0.5, "asset_cfg": SceneEntityCfg("robot")},
     )
-    hip_flexion = RewTerm(
-        func=mdp.hip_flexion_reward,
+    # 原 hip_flexion / hip_symmetry 与左右交替步态冲突（前者奖励髋后伸、后者惩罚双腿不对称），
+    # 改为由解析步态跟踪项统一约束，故删除。
+    gait_leg_tracking = RewTerm(
+        func=mdp.track_gait_leg_joints_exp,
+        weight=1.2,
+        params={"std": 0.5, "period_s": 0.9, "command_name": "base_velocity"},
+    )
+    gait_arm_tracking = RewTerm(
+        func=mdp.track_gait_arm_joints_exp,
         weight=0.5,
-        params={"min_angle": 0.1, "max_angle": 0.5, "asset_cfg": SceneEntityCfg("robot")},
-    )
-    hip_symmetry = RewTerm(
-        func=mdp.hip_symmetry_penalty,
-        weight=-0.5,
-        params={"threshold": 0.3, "asset_cfg": SceneEntityCfg("robot")},
+        params={"std": 0.4, "period_s": 0.9, "command_name": "base_velocity"},
     )
 
 

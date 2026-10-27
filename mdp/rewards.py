@@ -10,6 +10,8 @@ from isaaclab.managers import SceneEntityCfg
 from isaaclab.sensors import ContactSensor
 from isaaclab.utils.math import quat_apply, quat_apply_inverse, yaw_quat
 
+from . import gait
+
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedRLEnv
 
@@ -330,3 +332,41 @@ def torso_tilt_penalty(
     cos_tilt = torch.clamp(up_w[:, 2], -1.0, 1.0)            # (N,)
     tilt_deg = torch.rad2deg(torch.acos(cos_tilt))           # (N,)
     return torch.clamp(tilt_deg - max_tilt_deg, min=0.0)      # (N,)
+
+
+def track_gait_leg_joints_exp(
+    env,
+    std: float = 0.5,
+    period_s: float = 0.9,
+    command_name: str = "base_velocity",
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """跟踪解析步态的髋/膝/踝 pitch 参考角（6 关节，exp 核）。
+
+    参考角由 mdp.gait 用 2-link IK 从足端轨迹解出，步幅随命令速度自适应，
+    因此该奖励同时约束"迈步幅度与相位"，是抑制足底滑动的核心项。
+    """
+    asset = env.scene[asset_cfg.name]
+    joint_ids, _ = asset.find_joints(gait.LEG_JOINT_NAMES, preserve_order=True)
+    targets = gait.leg_joint_targets(env, period_s=period_s, command_name=command_name)
+    error = torch.sum(torch.square(targets - asset.data.joint_pos[:, joint_ids]), dim=1)
+    return torch.exp(-error / std**2)
+
+
+def track_gait_arm_joints_exp(
+    env,
+    std: float = 0.4,
+    period_s: float = 0.9,
+    command_name: str = "base_velocity",
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """跟踪与腿部同相位反相的手臂摆动参考（左右肩 + 左右肘，exp 核）。
+
+    左腿前摆时左肩后摆、右肩前摆；肘保持适度屈曲。相位与腿部完全共享，
+    避免手臂独立周期造成的脱节。
+    """
+    asset = env.scene[asset_cfg.name]
+    joint_ids, _ = asset.find_joints(gait.ARM_JOINT_NAMES, preserve_order=True)
+    targets = gait.arm_joint_targets(env, period_s=period_s)
+    error = torch.sum(torch.square(targets - asset.data.joint_pos[:, joint_ids]), dim=1)
+    return torch.exp(-error / std**2)

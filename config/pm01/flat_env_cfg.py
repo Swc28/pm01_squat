@@ -41,7 +41,8 @@ class PM01MyTaskEnvCfg(VelocityEnvCfg):
         self.rewards.feet_air_time.params["sensor_cfg"].body_names = ".*ANKLE.*"
         self.rewards.feet_slide.params["sensor_cfg"].body_names = ".*ANKLE.*"
         self.rewards.feet_slide.params["asset_cfg"].body_names = ".*ANKLE.*"
-        self.rewards.dof_pos_limits.params["asset_cfg"].joint_names = ".*ANKLE.*"
+        # 髋/膝/踝全腿限位惩罚（摆动期膝接近伸直，仅踝不足）
+        self.rewards.dof_pos_limits.params["asset_cfg"].joint_names = [".*HIP.*", ".*KNEE.*", ".*ANKLE.*"]
         self.rewards.termination_penalty.weight = -200.0
         # 强化站立姿态：躯干竖直 + 保持基座高度
         self.rewards.flat_orientation_l2.weight = -2.0

@@ -5,8 +5,9 @@ from isaaclab_rl.rsl_rl import RslRlOnPolicyRunnerCfg, RslRlPpoActorCriticCfg, R
 @configclass
 class PM01MyTaskPPORunnerCfg(RslRlOnPolicyRunnerCfg):
     num_steps_per_env = 24
-    max_iterations = 3000
-    save_interval = 500
+    # 行走任务：固定 0.5 m/s 直行，5000 轮收敛；每 1000 轮存点
+    max_iterations = 5000
+    save_interval = 1000
     experiment_name = "mytask_pm01"
     empirical_normalization = True
     policy = RslRlPpoActorCriticCfg(

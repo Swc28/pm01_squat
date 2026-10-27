@@ -92,8 +92,8 @@ phase = 0.5 * (1 - cos(2π·t / period_s))       # 0 = 站立，1 = 最深蹲
 
 | 超参 | 蹲起任务（当前主用） | 速度任务 |
 |---|---|---|
-| `max_iterations` | **15000** | 3000 |
-| `save_interval` | **3000** | 500 |
+| `max_iterations` | **15000** | 5000 |
+| `save_interval` | **3000** | 1000 |
 | `num_steps_per_env` | 24 | 24 |
 | `experiment_name` | `mytask_pm01_squat` | `mytask_pm01` |
 | `init_noise_std` | **0.5** | 1.0 |
@@ -217,6 +217,17 @@ python -m engineai_rl_lab.tasks.mytask.record_video \
 
 ## 七、副线：速度行走任务
 
+当前行走目标：**0.5 m/s 直行 20 m（45 s 单局，留 5 s 余量），保持站立姿态、避免倾倒**。
+
+| 项目 | 设置 | 位置 |
+|---|---|---|
+| 线速度指令 | `lin_vel_x=(0.5, 0.5)`，`lin_vel_y=(0, 0)` | `config/pm01/flat_env_cfg.py` |
+| 转向指令 | `ang_vel_z=(0, 0)`、`heading_command=False`、`rel_standing_envs=0` | 同上 |
+| 单局时长 | 训练/演示均为 45 s（0.5 m/s × 40 s = 20 m） | 同上 |
+| 站立姿态 | `flat_orientation_l2=-2.0`、`base_height_l2=-1.5`（target 0.87 m） | 同上 |
+| 防倾倒 | 终止 `base_contact`/`bad_orientation`/`root_height_below` + `push_robot` 抗扰（±0.3 m/s，8~12 s 一次） | 同上 |
+| 动作安全 | `joint_pos.clip={".*": (-1.5, 1.5)}` rad | 同上 |
+
 奖励设计（自定义函数见 `mdp/rewards.py`，挂载于 `velocity_env_cfg.py`）：
 
 | 奖励项 | 权重 | 阈值 | 作用 |
@@ -252,6 +263,7 @@ python scripts/velocity/play.py --task Isaac-Velocity-MyTask-PM01-Play-v0 \
 | 2026-10-24 | 蹲起训练发散修复 | 关节跟踪 std：腿 0.1、全关节 0.2（奖励恒 0 无梯度）；`track_base_height` 3.0；`init_noise_std=1.0`、`entropy_coef=0.01`、`lr=1e-3`；无关节目标限幅 | 腿 std 0.4、全关节 std 0.4；`track_base_height` 1.5；`init_noise_std=0.5`、`entropy_coef=0.003`、`lr=5e-4`；新增 `joint_pos.clip={".*": (-1.5, 1.5)}` | 崩溃根因：腿部跟踪奖励恒 0 + 探索噪声过大 → return 溢出 → `log_std` NaN；当时 save_interval=5000，崩溃丢 3100+ 轮 |
 | 2026-10-24 | 训练轮次与保存间隔调整 | 15000 轮 / 每 1000 轮 | 15000 轮 / **每 3000 轮** | 平衡磁盘占用与崩溃损失；最终产物 `model_14999.pt` |
 | 2026-10-24 | 腿轨迹奖励权重回退 | `track_leg_joint_traj` 3.0 | **2.0** | 单独验证放宽 std 的影响，不改权重以隔离变量 |
+| 2026-10-27 | 行走任务参数（0.5 m/s 直行 20 m） | 速度 `(0,1.0)`/侧移 ±0.3/转向 ±0.8/heading 开启/单局 20 s/`push_robot=None`；姿态权重 -1.0；PPO 3000 轮/每 500 存 | `lin_vel_x=(0.5,0.5)`、`lin_vel_y=0`、`ang_vel_z=0`、`heading_command=False`、`rel_standing_envs=0`、单局 45 s；`flat_orientation_l2=-2.0`、`base_height_l2=-1.5`、`joint_pos.clip=±1.5`；启用 `push_robot` ±0.3 m/s（8~12 s）；PPO 5000 轮/每 1000 存 | 仅改行走专属文件（`flat_env_cfg.py`、`PM01MyTaskPPORunnerCfg`）；蹲起配置与 `mdp/` 共享函数保持不变 |
 
 ## 九、维护约定
 

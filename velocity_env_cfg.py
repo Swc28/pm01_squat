@@ -19,17 +19,40 @@ from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR, ISAACLAB_NUCLEUS_DIR
 from isaaclab.utils.noise import AdditiveUniformNoiseCfg as Unoise
 
 import engineai_rl_lab.tasks.mytask.mdp as mdp
-
+import torch
+from engineai_rl_lab.tasks.mytask.mdp import gait as gait_mdp
 from isaaclab.terrains.config.rough import ROUGH_TERRAINS_CFG
+
+
+GAIT_PERIOD_S = 0.9
+
+
+def _phase_sin(env):
+    phase = gait_mdp.gait_phase(env, period_s=GAIT_PERIOD_S)
+    return torch.sin(2.0 * math.pi * phase).unsqueeze(-1)
+
+
+def _phase_cos(env):
+    phase = gait_mdp.gait_phase(env, period_s=GAIT_PERIOD_S)
+    return torch.cos(2.0 * math.pi * phase).unsqueeze(-1)
+
+
+def _foot_contact(env, sensor_cfg: SceneEntityCfg):
+    sensor = env.scene.sensors[sensor_cfg.name]
+    forces = sensor.data.net_forces_w[:, sensor_cfg.body_ids, :].norm(dim=-1)
+    return (forces > 1.0).float()
+
+
+def _foot_height(env, asset_cfg: SceneEntityCfg):
+    asset = env.scene[asset_cfg.name]
+    return asset.data.body_pos_w[:, asset_cfg.body_ids, 2:3]
 
 
 @configclass
 class SceneCfg(InteractiveSceneCfg):
     terrain = TerrainImporterCfg(
         prim_path="/World/ground",
-        terrain_type="generator",
-        terrain_generator=ROUGH_TERRAINS_CFG,
-        max_init_terrain_level=5,
+        terrain_type="plane",                  # ← 改平地
         collision_group=-1,
         physics_material=sim_utils.RigidBodyMaterialCfg(
             friction_combine_mode="multiply",
@@ -67,17 +90,19 @@ class SceneCfg(InteractiveSceneCfg):
 class CommandsCfg:
     base_velocity = mdp.UniformVelocityCommandCfg(
         asset_name="robot",
-        resampling_time_range=(5.0, 10.0),
-        rel_standing_envs=0.02,
-        rel_heading_envs=1.0,
-        heading_command=True,
+        resampling_time_range=(1000.0, 1000.0),   # ← 不重采样，固定 0.5
+        rel_standing_envs=0.0,                     # ← 不站桩
+        rel_heading_envs=0.0,                      # ← 不随机朝向
+        heading_command=False,                     # ← 关闭 heading
         heading_control_stiffness=0.5,
         debug_vis=True,
         ranges=mdp.UniformVelocityCommandCfg.Ranges(
-            lin_vel_x=(0.0, 1.0), lin_vel_y=(-0.5, 0.5), ang_vel_z=(-1.0, 1.0), heading=(-math.pi, math.pi)
+            lin_vel_x=(0.5, 0.5),                  # ← 固定 0.5 m/s
+            lin_vel_y=(0.0, 0.0),
+            ang_vel_z=(0.0, 0.0),
+            heading=(0.0, 0.0),
         ),
     )
-
 
 @configclass
 class ActionsCfg:
@@ -104,13 +129,24 @@ class ObservationsCfg:
             noise=Unoise(n_min=-0.1, n_max=0.1),
             clip=(-1.0, 1.0),
         )
+        # ---- 新增：步态相位与足端感知 ----
+        gait_phase_sin = ObsTerm(func=_phase_sin)
+        gait_phase_cos = ObsTerm(func=_phase_cos)
+        foot_contact = ObsTerm(
+            func=_foot_contact,
+            params={"sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*ANKLE.*")},
+        )
+        foot_height = ObsTerm(
+            func=_foot_height,
+            params={"asset_cfg": SceneEntityCfg("robot", body_names=".*ANKLE.*")},
+            noise=Unoise(n_min=-0.005, n_max=0.005),
+        )
 
         def __post_init__(self):
             self.enable_corruption = True
             self.concatenate_terms = True
 
     policy: PolicyCfg = PolicyCfg()
-
 
 @configclass
 class EventCfg:
@@ -178,9 +214,9 @@ class EventCfg:
 class RewardsCfg:
     termination_penalty = RewTerm(func=mdp.is_terminated, weight=-200.0)
     stand_still = RewTerm(
-    func=mdp.stand_still_joint_deviation_l1,
-    weight=-0.5,
-    params={"command_name": "base_velocity", "asset_cfg": SceneEntityCfg("robot")},
+        func=mdp.stand_still_joint_deviation_l1,
+        weight=-0.5,
+        params={"command_name": "base_velocity", "asset_cfg": SceneEntityCfg("robot")},
     )
     track_lin_vel_xy_exp = RewTerm(
         func=mdp.track_lin_vel_xy_yaw_frame_exp,
@@ -196,11 +232,10 @@ class RewardsCfg:
         params={
             "command_name": "base_velocity",
             "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*ANKLE.*"),
-            "threshold": 0.4,
+            "threshold": 0.25,                      # ← 0.4 → 0.25
         },
     )
     feet_slide = RewTerm(
-        # -0.3 → -1.0：滑动是"靠足底蹭地前进"的主因，需与步态跟踪奖励同量级才能抑制
         func=mdp.feet_slide,
         weight=-1.0,
         params={
@@ -209,7 +244,6 @@ class RewardsCfg:
         },
     )
     dof_pos_limits = RewTerm(
-        # 仅踝 → 髋/膝/踝：摆动期膝接近伸直（软下限 -0.21），需对整条腿做限位惩罚
         func=mdp.joint_pos_limits,
         weight=-1.0,
         params={"asset_cfg": SceneEntityCfg("robot", joint_names=[".*HIP.*", ".*KNEE.*", ".*ANKLE.*"])},
@@ -220,15 +254,14 @@ class RewardsCfg:
         params={"asset_cfg": SceneEntityCfg("robot", joint_names=[".*HIP_YAW.*", ".*HIP_ROLL.*"])},
     )
     joint_deviation_arms = RewTerm(
-        # -0.5 → -0.1：原权重把手臂强拉回默认姿态，与"摆臂"目标直接冲突
         func=mdp.joint_deviation_l1,
-        weight=-0.1,
+        weight=-0.05,                               # ← -0.1 → -0.05
         params={"asset_cfg": SceneEntityCfg("robot", joint_names=[".*SHOULDER.*", ".*ELBOW.*"])},
     )
     joint_deviation_torso = RewTerm(
         func=mdp.joint_deviation_l1, weight=-0.1, params={"asset_cfg": SceneEntityCfg("robot", joint_names=[".*WAIST.*", ".*HEAD.*"])}
     )
-    lin_vel_z_l2 = RewTerm(func=mdp.lin_vel_z_l2, weight=-0.5)
+    lin_vel_z_l2 = RewTerm(func=mdp.lin_vel_z_l2, weight=-0.1)              # ← -0.5 → -0.1
     flat_orientation_l2 = RewTerm(func=mdp.flat_orientation_l2, weight=-1.0)
     action_rate_l2 = RewTerm(func=mdp.action_rate_l2, weight=-0.001)
     dof_torques_l2 = RewTerm(
@@ -248,34 +281,40 @@ class RewardsCfg:
     )
     base_height_l2 = RewTerm(
         func=mdp.base_height_l2,
-        weight=-1.0,
+        weight=-0.3,                                # ← -1.0 → -0.3
         params={"target_height": 0.87},
     )
     knee_bend = RewTerm(
-        # 阈值 1.0 → 1.2：步态摆动期膝屈约 0.85 rad，原阈值会惩罚正常抬腿
         func=mdp.knee_bend_penalty,
         weight=-0.5,
         params={"threshold": 1.2, "asset_cfg": SceneEntityCfg("robot")},
     )
     hip_extension = RewTerm(
-        # 阈值 0.3 → 0.5：参考步态前摆髋约 0.27 rad，原阈值会压制正常迈步
         func=mdp.hip_extension_penalty,
         weight=-0.3,
         params={"threshold": 0.5, "asset_cfg": SceneEntityCfg("robot")},
     )
-    # 原 hip_flexion / hip_symmetry 与左右交替步态冲突（前者奖励髋后伸、后者惩罚双腿不对称），
-    # 改为由解析步态跟踪项统一约束，故删除。
     gait_leg_tracking = RewTerm(
         func=mdp.track_gait_leg_joints_exp,
-        weight=1.2,
-        params={"std": 0.5, "period_s": 0.9, "command_name": "base_velocity"},
+        weight=1.8,                                 # ← 1.2 → 1.8
+        params={"std": 0.2, "period_s": 0.9, "command_name": "base_velocity"},   # ← std 0.5 → 0.2
     )
     gait_arm_tracking = RewTerm(
         func=mdp.track_gait_arm_joints_exp,
-        weight=0.5,
-        params={"std": 0.4, "period_s": 0.9, "command_name": "base_velocity"},
+        weight=0.8,                                 # ← 0.5 → 0.8
+        params={"std": 0.2, "period_s": 0.9, "command_name": "base_velocity"},   # ← std 0.4 → 0.2
     )
-
+    # ---- 新增：摆动相抬脚高度 ----
+    foot_clearance = RewTerm(
+        func=mdp.foot_clearance,
+        weight=0.5,
+        params={
+            "target_height": 0.08,
+            "std": 0.03,
+            "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*ANKLE.*"),
+            "asset_cfg": SceneEntityCfg("robot", body_names=".*ANKLE.*"),
+        },
+    )
 
 @configclass
 class TerminationsCfg:
@@ -296,9 +335,9 @@ class TerminationsCfg:
 
 @configclass
 class CurriculumCfg:
-    terrain_levels = CurrTerm(func=mdp.terrain_levels_vel)
-
-
+    # 平地任务不需要地形 curriculum，先关闭；学好平地直走后可恢复
+    # terrain_levels = CurrTerm(func=mdp.terrain_levels_vel)
+    pass
 @configclass
 class VelocityEnvCfg(ManagerBasedRLEnvCfg):
     scene: SceneCfg = SceneCfg(num_envs=4096, env_spacing=2.5)
@@ -312,7 +351,7 @@ class VelocityEnvCfg(ManagerBasedRLEnvCfg):
 
     def __post_init__(self):
         self.decimation = 4
-        self.episode_length_s = 20.0
+        self.episode_length_s = 50.0   #← 20.0 → 50.0
         self.sim.dt = 0.005
         self.sim.render_interval = self.decimation
         self.sim.physics_material = self.scene.terrain.physics_material

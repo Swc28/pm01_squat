@@ -155,7 +155,7 @@ def leg_joint_targets(
 def arm_joint_targets(
     env,
     period_s: float = 0.9,
-    amplitude: float = 0.2,
+    amplitude: float = 0.35, #← 0.2 → 0.35 摆手臂更加明显
     elbow_target: float = ELBOW_PITCH_DEFAULT - 0.05,
 ) -> torch.Tensor:
     """手臂 4 个 pitch 关节目标角，顺序 [左肩, 左肘, 右肩, 右肘]。

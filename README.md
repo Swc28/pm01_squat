@@ -296,6 +296,7 @@ python scripts/velocity/play.py --task Isaac-Velocity-MyTask-PM01-Play-v0 \
 | 2026-10-27 | 行走任务参数（0.5 m/s 直行 20 m） | 速度 `(0,1.0)`/侧移 ±0.3/转向 ±0.8/heading 开启/单局 20 s/`push_robot=None`；姿态权重 -1.0；PPO 3000 轮/每 500 存 | `lin_vel_x=(0.5,0.5)`、`lin_vel_y=0`、`ang_vel_z=0`、`heading_command=False`、`rel_standing_envs=0`、单局 45 s；`flat_orientation_l2=-2.0`、`base_height_l2=-1.5`、`joint_pos.clip=±1.5`；启用 `push_robot` ±0.3 m/s（8~12 s）；PPO 5000 轮/每 1000 存 | 仅改行走专属文件（`flat_env_cfg.py`、`PM01MyTaskPPORunnerCfg`）；蹲起配置与 `mdp/` 共享函数保持不变 |
 | 2026-10-27 | 行走任务 PPO 轮次 | 8000 轮 / 每 1000 轮存点 | **10000 轮 / 每 5000 轮存点** | 产物 `model_0.pt`、`model_5000.pt`、`model_9999.pt`；仅改 `PM01MyTaskPPORunnerCfg` |
 | 2026-10-27 | 行走任务步态跟踪改造 | 无步态参考；`feet_slide=-0.3`、`dof_pos_limits` 仅踝、`joint_deviation_arms=-0.5`、`knee_bend` 阈值 1.0/-0.8、`hip_extension` 阈值 0.3/-0.5；`hip_flexion_reward`(0.5)、`hip_symmetry_penalty`(-0.5) 挂载中；PPO `init_noise_std=1.0`、`entropy_coef=0.01`、`lr=1e-3` | 新增 `mdp/gait.py` 解析步态 + `gait_leg_tracking`(1.2, std 0.5)、`gait_arm_tracking`(0.5, std 0.4)；`feet_slide=-1.0`、`dof_pos_limits` 扩至髋/膝/踝、`joint_deviation_arms=-0.1`、`knee_bend` 1.2/-0.5、`hip_extension` 0.5/-0.3；移除 `hip_flexion`/`hip_symmetry` 挂载；PPO `init_noise_std=0.5`、`entropy_coef=0.003`、`lr=5e-4` | 目标：抑制足底滑动、形成左右交替步态与自然摆臂；相位不入观测，观测维度不变可继承旧检查点 |
+| 2026-10-27 | 行走任务仿真效果（`2026-10-27_14-59-37` / `model_9999.pt`） | — | — | **已达成**：0.5 m/s 直行 20 m，全程未倾倒、无提前终止。**未达成**：双腿未形成交替步态（呈"蹭地/滑步"式前进），摆臂亦无明显交替 |
 
 ## 九、维护约定
 

@@ -370,3 +370,24 @@ def track_gait_arm_joints_exp(
     targets = gait.arm_joint_targets(env, period_s=period_s)
     error = torch.sum(torch.square(targets - asset.data.joint_pos[:, joint_ids]), dim=1)
     return torch.exp(-error / std**2)
+
+def foot_clearance(
+    env,
+    target_height: float = 0.08,
+    std: float = 0.03,
+    sensor_cfg: SceneEntityCfg = SceneEntityCfg("contact_forces", body_names=".*ANKLE.*"),
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot", body_names=".*ANKLE.*"),
+) -> torch.Tensor:
+    """奖励摆动脚达到目标离地高度（对抗拖脚）。
+
+    接触判定用接触力 > 1.0 N；仅在非接触（摆动相）时给奖励，
+    避免把支撑脚也纳入。地面为平面 z≈0，直接取 body z 作为离地高度。
+    """
+    contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
+    in_contact = (
+        contact_sensor.data.net_forces_w[:, sensor_cfg.body_ids, :].norm(dim=-1) > 1.0
+    )  # (N, num_feet) bool
+    asset = env.scene[asset_cfg.name]
+    foot_z = asset.data.body_pos_w[:, asset_cfg.body_ids, 2]   # (N, num_feet)
+    reward = torch.exp(-((foot_z - target_height) ** 2) / std ** 2) * (~in_contact).float()
+    return reward.mean(dim=1)

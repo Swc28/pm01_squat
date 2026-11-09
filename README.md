@@ -121,6 +121,7 @@ mytask/
 ├── record_video.py                 # 蹲起离屏相机录视频脚本
 ├── mdp/
 │   ├── commands.py                 # SquatPoseCommand：余弦相位关键帧插值
+│   ├── events.py                   # 行走：记录出生位姿，出生航向系下直线观测/奖励
 │   ├── rewards.py                  # 蹲起/速度自定义奖励函数
 │   ├── terminations.py
 │   └── curriculums.py
@@ -223,11 +224,14 @@ python -m engineai_rl_lab.tasks.mytask.record_video \
 
 | 项目 | 设置 | 位置 |
 |---|---|---|
-| 线速度指令 | `lin_vel_x=(0.5, 0.5)`，`lin_vel_y=(0, 0)` | `config/pm01/flat_env_cfg.py` |
-| 转向指令 | `ang_vel_z=(0, 0)`、`heading_command=False`、`rel_standing_envs=0` | 同上 |
-| 单局时长 | 训练/演示均为 45 s（0.5 m/s × 40 s = 20 m） | 同上 |
-| 站立姿态 | `flat_orientation_l2=-2.0`、`base_height_l2=-1.5`（target 0.87 m） | 同上 |
-| 防倾倒 | 终止 `base_contact`/`bad_orientation`/`root_height_below` + `push_robot` 抗扰（±0.3 m/s，8~12 s 一次） | 同上 |
+| 线速度指令 | `lin_vel_x=(0.5, 0.5)`，`lin_vel_y=(0, 0)`，`resampling_time_range=(1000,1000)`（整局不重采样） | `velocity_env_cfg.py` |
+| 转向指令 | `ang_vel_z=(0, 0)`、`heading=(0, 0)`、`heading_command=False`、`rel_standing_envs=0`、`rel_heading_envs=0` | 同上 |
+| 单局时长 | 训练/演示均为 **45 s**（0.5 m/s × 40 s = 20 m）；基类已改为 50 s，但 PM01 配置仍覆盖为 45 s | `flat_env_cfg.py` |
+| 地形 / 课程 | 平地 `terrain_type="plane"`、`terrain_generator=None`，地形课程 `terrain_levels` 已关闭 | `velocity_env_cfg.py` |
+| 观测 | **84 → 92 维**：新增步态相位 `gait_phase_sin/cos`（2）、脚部接触 `foot_contact`（2）、脚部高度 `foot_height`（2）、出生航向误差 `heading_error`（1）、侧向位移 `lateral_pos`（1） | 同上 |
+| 出生参考系 | `reset_base` 位姿范围全 0（出生点/航向固定），reset 后由 `record_walk_spawn` 记录出生位姿与航向，直线类奖励/观测均在该**出生航向系**下计算 | `mdp/events.py` |
+| 站立姿态 | `flat_orientation_l2=-1.0`、`base_height_l2=-0.5`（target 0.87 m）——第一阶段放宽，避免与"走直"抢梯度 | `flat_env_cfg.py` |
+| 防倾倒 | 终止 `base_contact`/`bad_orientation`/`root_height_below`；`push_robot` 已**关闭**（第一阶段先走直，抗扰作为后续课程） | 同上 |
 | 动作安全 | `joint_pos.clip={".*": (-1.5, 1.5)}` rad | 同上 |
 
 奖励设计（自定义函数见 `mdp/rewards.py`、`mdp/gait.py`，挂载于 `velocity_env_cfg.py`，
@@ -236,21 +240,29 @@ python -m engineai_rl_lab.tasks.mytask.record_video \
 | 奖励项 | 权重 | 关键参数 | 作用 |
 |---|---|---|---|
 | `termination_penalty` | -200.0 | — | 摔倒 / 基座触地终止 |
-| `track_lin_vel_xy_exp` | 1.5 | std 0.35 | 主任务：跟踪 0.5 m/s 线速度指令 |
-| `track_ang_vel_z_exp` | 1.0 | std 0.5 | 角速度跟踪（指令恒为 0，等价于“不许转”） |
-| `gait_leg_tracking` | 1.2 | std 0.5、`period_s=0.9` | **核心项**：跟踪解析步态的髋/膝/踝 6 关节参考角，抑制“蹭地前进” |
-| `gait_arm_tracking` | 0.5 | std 0.4、`period_s=0.9` | 跟踪与腿同相位反相的摆臂参考（左右肩 + 左右肘） |
-| `feet_air_time` | 0.75 | 阈值 0.4 s | 鼓励正常交替步态周期 |
+| `track_lin_vel_xy_exp` | 2.0 | std 0.3 | 主任务：跟踪 0.5 m/s 线速度指令 |
+| `track_ang_vel_z_exp` | 1.2 | std 0.2 | 角速度跟踪（指令恒为 0，等价于“不许转”） |
+| `ang_vel_z_l2` | -1.0 | — | 显式惩罚偏航角速度（exp 核对慢速打转惩罚过弱，已由 -0.5 加强） |
+| `heading_error_l2` | -1.5 | 出生航向系 | 惩罚相对出生航向的偏航角（rad²） |
+| `lateral_drift_l2` | -0.8 | 出生航向系 | 惩罚出生航向系下的侧向漂移（m²） |
+| `forward_progress` | +0.4 | `max_speed=0.6` | 奖励沿出生航向的前向速度（截断到 [0, 0.6]），抑制原地踏步 |
+| `gait_leg_tracking` | 0.3 | std 0.5、`period_s=0.9`、左右腿分开取均值 | 跟踪解析步态的髋/膝/踝 6 关节参考角，抑制“蹭地前进”；**第一阶段降权**（1.8→0.3），先走直、步态后置 |
+| `gait_arm_tracking` | 0.08 | std 0.2、`period_s=0.9` | 跟踪与腿同相位反相的摆臂参考（左右肩 + 左右肘），摆臂幅度 0.35 rad；第一阶段降权（0.4→0.08） |
+| `foot_clearance` | 0.1 | 目标离地 0.08 m、std 0.03 | 摆动相抬脚高度奖励，**只对“该相位应摆动”的那只脚生效**（原实现任意脚离地即给奖励，会助推双脚腾空）；第一阶段降权（0.5→0.1） |
+| `gait_contact` | 0.12 | `period_s=0.9` | **接触时序**：支撑相（phase<0.6）的脚必须触地、摆动相的脚必须离地；按左右匹配比例给分，弹跳时封顶 0.5；第一阶段降权（0.6→0.12） |
+| `feet_air_time` | 0.5 | 阈值 0.2 s | 鼓励正常交替步态周期 |
 | `feet_slide` | -1.0 | — | 惩罚支撑期足底滑动（与步态跟踪同量级） |
-| `both_feet_airborne` | -0.5 | — | 禁止双脚同时离地（防“跳跃式”前进） |
-| `flat_orientation_l2` | -2.0 | — | 躯干保持直立 |
-| `base_height_l2` | -1.5 | 目标 0.87 m | 保持基座高度 |
-| `lin_vel_z_l2` | -0.5 | — | 抑制竖直方向弹跳 |
+| `both_feet_airborne` | -1.0 | — | 禁止双脚同时离地（防弹跳式前进，已由 -0.5 加强） |
+| `double_support` | -0.1 | `period_s=0.9` | 本应单脚支撑却双脚同时触地时惩罚（反"滑步/蹭地"）；第一阶段降权（-0.5→-0.1） |
+| `flat_orientation_l2` | -1.0 | — | 躯干保持直立（第一阶段由 -2.0 放宽） |
+| `base_height_l2` | -0.5 | 目标 0.87 m | 保持基座高度（第一阶段由 -1.5 放宽） |
+| `lin_vel_z_l2` | -0.1 | — | 抑制竖直方向弹跳（放宽以允许步态起伏） |
 | `knee_bend` | -0.5 | 阈值 1.2 rad | 抑制膝盖过度弯曲（阈值已放宽到不干扰摆动期抬腿） |
 | `hip_extension` | -0.3 | 阈值 0.5 rad | 抑制髋关节过度后伸（阈值已放宽到不压制正常迈步） |
 | `dof_pos_limits` | -1.0 | 髋/膝/踝 | 关节软限位惩罚（全腿，不只踝） |
-| `joint_deviation_hip` | -0.1 | 髋 yaw/roll | 髋侧向保持默认 |
-| `joint_deviation_arms` | -0.1 | 肩/肘 | 弱约束手臂，给摆臂留空间 |
+| `joint_deviation_hip_roll` | -0.5 | 髋 roll | 髋外展保持默认（防双腿大幅分开） |
+| `joint_deviation_hip_yaw` | -0.1 | 髋 yaw | 髋侧向保持默认 |
+| `joint_deviation_arms` | -0.05 | 肩/肘 | 弱约束手臂，给摆臂留空间 |
 | `joint_deviation_torso` | -0.1 | 腰/头 | 腰、头保持默认 |
 | `stand_still` | -0.5 | `command_name=base_velocity` | 指令接近 0 时惩罚乱动（直行指令下基本不触发） |
 | `action_rate_l2` | -0.005 | — | 动作平滑 |
@@ -261,14 +273,23 @@ python -m engineai_rl_lab.tasks.mytask.record_video \
 `shoulder_flexion_penalty`（压制摆臂）——三者都与左右交替步态直接冲突，改由
 `gait_leg_tracking` / `gait_arm_tracking` 统一约束。三个函数仍保留在 `mdp/rewards.py`，只是当前未挂载。
 
+> 注：`velocity_env_cfg.py` 基类中另有几项被 `config/pm01/flat_env_cfg.py` 覆盖，上表已按生效值填写。
+> 目前仅 `action_rate_l2`（基类 -0.001 → 生效 **-0.005**）存在基类/生效值差异；
+> `flat_orientation_l2`、`base_height_l2`、`episode_length_s`(45 s)、`push_robot=None`、
+> `reset_base` 位姿全 0 在基类与 PM01 配置中已一致，改基类即可生效。
+
 步态参考要点（`mdp/gait.py`）：
 
-- 相位由 episode 时间推导（`episode_length_buf × step_dt / period_s`），左右腿相差 0.5 周期，
-  **不进入观测**，因此观测维度不变，可继承旧检查点
+- 相位由 episode 时间推导（`episode_length_buf × step_dt / period_s`），左右腿相差 0.5 周期；
+  **相位 sin/cos 已加入观测**（`gait_phase_sin` / `gait_phase_cos`），策略可感知当前步态相位
 - 足端轨迹用 2-link IK（大腿 0.339 m、小腿 0.364 m）解出髋/膝/踝 pitch 目标，
   支撑期 0.6 周期、抬脚 0.04 m；步幅 `A = 0.5·v·0.6·T` 随命令速度自适应，
   保证支撑脚相对机身速度恰为 −v
 - 默认站姿下参考增量恒为 0，参考角经关节软限位裁剪后输出
+- 摆臂参考幅度 0.35 rad，与腿同相位反相；肘固定在略屈曲角度
+
+> 观测由 84 维增至 **92 维**（+ 相位 2、脚部接触 2、脚部高度 2、出生航向误差 1、侧向位移 1），
+> **旧检查点不再兼容**，本次改动必须从头训练，不能 `--resume` 旧 run。
 
 ```bash
 # 训练
@@ -297,6 +318,9 @@ python scripts/velocity/play.py --task Isaac-Velocity-MyTask-PM01-Play-v0 \
 | 2026-10-27 | 行走任务 PPO 轮次 | 8000 轮 / 每 1000 轮存点 | **10000 轮 / 每 5000 轮存点** | 产物 `model_0.pt`、`model_5000.pt`、`model_9999.pt`；仅改 `PM01MyTaskPPORunnerCfg` |
 | 2026-10-27 | 行走任务步态跟踪改造 | 无步态参考；`feet_slide=-0.3`、`dof_pos_limits` 仅踝、`joint_deviation_arms=-0.5`、`knee_bend` 阈值 1.0/-0.8、`hip_extension` 阈值 0.3/-0.5；`hip_flexion_reward`(0.5)、`hip_symmetry_penalty`(-0.5) 挂载中；PPO `init_noise_std=1.0`、`entropy_coef=0.01`、`lr=1e-3` | 新增 `mdp/gait.py` 解析步态 + `gait_leg_tracking`(1.2, std 0.5)、`gait_arm_tracking`(0.5, std 0.4)；`feet_slide=-1.0`、`dof_pos_limits` 扩至髋/膝/踝、`joint_deviation_arms=-0.1`、`knee_bend` 1.2/-0.5、`hip_extension` 0.5/-0.3；移除 `hip_flexion`/`hip_symmetry` 挂载；PPO `init_noise_std=0.5`、`entropy_coef=0.003`、`lr=5e-4` | 目标：抑制足底滑动、形成左右交替步态与自然摆臂；相位不入观测，观测维度不变可继承旧检查点 |
 | 2026-10-27 | 行走任务仿真效果（`2026-10-27_14-59-37` / `model_9999.pt`） | — | — | **已达成**：0.5 m/s 直行 20 m，全程未倾倒、无提前终止。**未达成**：双腿未形成交替步态（呈"蹭地/滑步"式前进），摆臂亦无明显交替 |
+| 2026-10-31 | 行走步态观测重构 + 奖励收紧 | 相位不入观测（84 维）；`gait_leg_tracking` 1.2/std 0.5；`gait_arm_tracking` 0.5/std 0.4；`feet_air_time` 阈值 0.4；`lin_vel_z_l2=-0.5`；`joint_deviation_arms=-0.1`；`base_height_l2=-1.0`；地形 generator + 地形课程；命令每 5~10 s 重采样 | 观测新增 `gait_phase_sin/cos`(2)、`foot_contact`(2)、`foot_height`(2) → **90 维**；`gait_leg_tracking` **1.8/std 0.2**、`gait_arm_tracking` **0.8/std 0.2**、摆臂幅度 **0.35**；新增 `foot_clearance`（0.5，目标离地 0.08 m，std 0.03）；`feet_air_time` 阈值 **0.25**；`lin_vel_z_l2=-0.1`；`joint_deviation_arms=-0.05`；地形改平地、关闭地形课程；命令固定不重采样 | 目的：让策略可感知相位，从而形成左右交替步态；**观测维度变化，旧检查点不可复用，必须从头训练**。另：基类 `base_height_l2=-0.3`、`episode_length_s=50` 被 `flat_env_cfg.py` 覆盖为 -1.5 / 45 s，实际未生效 |
+| 2026-11-03 | 行走步态退化修复（P0–P3） | `gait_leg_tracking` std 0.2 + 6 关节误差求和（实测恒 0、无梯度）；`track_lin_vel` 1.5/std 0.35；`track_ang_vel` 1.0/std 0.5；`gait_contact` 1.0；`gait_arm_tracking` 0.8；`feet_air_time` 0.75/阈值 0.25；`joint_deviation_hip` -0.1（roll+yaw 合并） | `gait_leg_tracking` std **0.5** 且左右腿分开取均值；`track_lin_vel` **2.0/std 0.3**；`track_ang_vel` **1.2/std 0.2** 并新增 `ang_vel_z_l2`(-0.5)；`gait_contact` **0.6**；`gait_arm_tracking` **0.4**；`feet_air_time` **0.5/阈值 0.2**；髋 roll 单独 **-0.5**、yaw 保持 -0.1 | 现象：双腿外展约 120°、左腿动右腿不动、绕半径约 3 m 画圆。根因：步态跟踪奖励 exp 饱和恒 0，策略只剩速度+摆臂奖励，退化为单腿支点 + 恒定偏航（yaw≈0.17 rad/s）。观测维度不变可 resume，但建议从头训 |
+| 2026-11-09 | 行走第一阶段"先走直"改造 | `gait_leg_tracking` 1.8、`gait_arm_tracking` 0.4、`foot_clearance` 0.5、`gait_contact` 0.6、`double_support` -0.5、`ang_vel_z_l2` -0.5、`flat_orientation_l2` -2.0、`base_height_l2` -1.5；`push_robot` ±0.3 m/s；`reset_base` x/y ±0.5、yaw ±π；观测 90 维 | 步态/抬脚/接触类奖励统一 **×0.2 降权**（0.3 / 0.08 / 0.1 / 0.12 / -0.1）；`ang_vel_z_l2` **-1.0**；新增 `heading_error_l2`(**-1.5**)、`lateral_drift_l2`(**-0.8**)、`forward_progress`(**+0.4**, max 0.6)；`flat_orientation_l2` **-1.0**、`base_height_l2` **-0.5**；**关闭 push_robot**；出生点位姿固定全 0 | 新增 `mdp/events.py`：reset 后由 `record_walk_spawn` 记录出生位姿/航向，新增 `heading_error`/`lateral_pos` 观测与直线类奖励均在**出生航向系**下计算（观测 90→**92 维**）。策略：第一阶段只要求"沿出生航向走直"，步态/姿态项降权避免互相抢梯度；观测维度再变，旧检查点不可复用，必须从头训 |
 
 ## 九、维护约定
 

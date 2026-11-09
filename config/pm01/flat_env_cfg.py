@@ -20,14 +20,13 @@ class PM01MyTaskEnvCfg(VelocityEnvCfg):
         # 关节位置目标限幅（rad，绝对目标）：防极端动作把物理状态打爆
         self.actions.joint_pos.clip = {".*": (-1.5, 1.5)}
 
-        # 抗扰：周期性施加小幅推力，训练"避免倾倒"的鲁棒性
-        self.events.push_robot.params = {"velocity_range": {"x": (-0.3, 0.3), "y": (-0.3, 0.3)}}
-        self.events.push_robot.interval_range_s = (8.0, 12.0)
+        # 第一阶段关掉推扰，先保证出生航向系下 20 m 走直
+        self.events.push_robot = None
         self.events.add_base_mass = None
         self.events.reset_robot_joints.params["position_range"] = (1.0, 1.0)
         self.events.base_external_force_torque.params["asset_cfg"].body_names = ["LINK_BASE"]
         self.events.reset_base.params = {
-            "pose_range": {"x": (-0.5, 0.5), "y": (-0.5, 0.5), "yaw": (-3.14, 3.14)},
+            "pose_range": {"x": (0.0, 0.0), "y": (0.0, 0.0), "yaw": (0.0, 0.0)},
             "velocity_range": {
                 "x": (0.0, 0.0),
                 "y": (0.0, 0.0),
@@ -44,9 +43,9 @@ class PM01MyTaskEnvCfg(VelocityEnvCfg):
         # 髋/膝/踝全腿限位惩罚（摆动期膝接近伸直，仅踝不足）
         self.rewards.dof_pos_limits.params["asset_cfg"].joint_names = [".*HIP.*", ".*KNEE.*", ".*ANKLE.*"]
         self.rewards.termination_penalty.weight = -200.0
-        # 强化站立姿态：躯干竖直 + 保持基座高度
-        self.rewards.flat_orientation_l2.weight = -2.0
-        self.rewards.base_height_l2.weight = -1.5
+        # 第一阶段放宽姿态，避免把步态冻死、与前进抢梯度
+        self.rewards.flat_orientation_l2.weight = -1.0
+        self.rewards.base_height_l2.weight = -0.5
         self.rewards.dof_torques_l2.weight = -2.0e-6
         self.rewards.action_rate_l2.weight = -0.005
         self.rewards.dof_acc_l2.weight = -1.0e-7

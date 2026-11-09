@@ -2,7 +2,8 @@
 
 设计说明：
 - 相位由 episode 时间推导（env.episode_length_buf * env.step_dt），左右腿相差 0.5 相位。
-  相位不进入观测，保持观测维度 84 不变，从而可以继承已有行走策略检查点。
+  相位的 sin/cos 已加入观测（velocity_env_cfg 的 gait_phase_sin / gait_phase_cos），
+  策略能感知当前处于支撑相还是摆动相。
 - 足端轨迹定义在髋关节矢状面内；几何量取实测值（/tmp/probe_pm01.py）：
   大腿 0.339 m、小腿 0.364 m。IK 基准用默认站姿（root≈0.90 m）髋→踝 0.6965 m，
   步态中心高度用 root=0.87 m 对应的 0.6665 m，与 base_height_l2 目标保持一致。
@@ -110,6 +111,17 @@ def foot_target(phase: torch.Tensor, stride: torch.Tensor | float) -> tuple[torc
     z_sw = SWING_LIFT * torch.sin(math.pi * u_sw)
     zeros = torch.zeros_like(phase)
     return torch.where(stance, x_st, x_sw), torch.where(stance, zeros, z_sw)
+
+
+def contact_schedule(env, period_s: float = 0.9) -> torch.Tensor:
+    """期望接触状态 (N, 2)，顺序 [左脚, 右脚]，True 表示该脚应处于支撑相。
+
+    与 foot_target 的划分一致：相位 < STANCE_RATIO 为支撑相（脚应触地），
+    其余为摆动相（脚应离地）。左右相差 0.5 相位，因此大部分时间恰有一只脚支撑。
+    """
+    phase_l = gait_phase(env, period_s)
+    phase_r = torch.remainder(phase_l + 0.5, 1.0)
+    return torch.stack([phase_l < STANCE_RATIO, phase_r < STANCE_RATIO], dim=-1)
 
 
 # ---------------------------------------------------------------------------

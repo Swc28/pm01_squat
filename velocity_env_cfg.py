@@ -45,7 +45,7 @@ def _foot_contact(env, sensor_cfg: SceneEntityCfg):
 
 def _foot_height(env, asset_cfg: SceneEntityCfg):
     asset = env.scene[asset_cfg.name]
-    return asset.data.body_pos_w[:, asset_cfg.body_ids, 2:3]
+    return asset.data.body_pos_w[:, asset_cfg.body_ids, 2]
 
 
 @configclass
@@ -120,6 +120,8 @@ class ObservationsCfg:
             noise=Unoise(n_min=-0.05, n_max=0.05),
         )
         velocity_commands = ObsTerm(func=mdp.generated_commands, params={"command_name": "base_velocity"})
+        heading_error = ObsTerm(func=mdp.walk_heading_error)
+        lateral_pos = ObsTerm(func=mdp.walk_lateral_pos, clip=(-2.0, 2.0))
         joint_pos = ObsTerm(func=mdp.joint_pos_rel, noise=Unoise(n_min=-0.01, n_max=0.01))
         joint_vel = ObsTerm(func=mdp.joint_vel_rel, noise=Unoise(n_min=-1.5, n_max=1.5))
         actions = ObsTerm(func=mdp.last_action)
@@ -183,7 +185,7 @@ class EventCfg:
         func=mdp.reset_root_state_uniform,
         mode="reset",
         params={
-            "pose_range": {"x": (-0.5, 0.5), "y": (-0.5, 0.5), "yaw": (-3.14, 3.14)},
+            "pose_range": {"x": (0.0, 0.0), "y": (0.0, 0.0), "yaw": (0.0, 0.0)},
             "velocity_range": {
                 "x": (0.0, 0.0),
                 "y": (0.0, 0.0),
@@ -202,12 +204,14 @@ class EventCfg:
             "velocity_range": (0.0, 0.0),
         },
     )
-    push_robot = EventTerm(
-        func=mdp.push_by_setting_velocity,
-        mode="interval",
-        interval_range_s=(10.0, 15.0),
-        params={"velocity_range": {"x": (-0.5, 0.5), "y": (-0.5, 0.5)}},
+    # 必须在 reset_base 之后：直线奖励/观测以该位姿为原点
+    record_walk_spawn = EventTerm(
+        func=mdp.record_walk_spawn_pose,
+        mode="reset",
+        params={"asset_cfg": SceneEntityCfg("robot")},
     )
+    # 第一阶段关掉推扰，先保证 20 m 走直；鲁棒性作为后续课程
+    push_robot = None
 
 
 @configclass
@@ -220,19 +224,24 @@ class RewardsCfg:
     )
     track_lin_vel_xy_exp = RewTerm(
         func=mdp.track_lin_vel_xy_yaw_frame_exp,
-        weight=1.5,
-        params={"command_name": "base_velocity", "std": 0.35},
+        weight=2.0,
+        params={"command_name": "base_velocity", "std": 0.3},
     )
     track_ang_vel_z_exp = RewTerm(
-        func=mdp.track_ang_vel_z_world_exp, weight=1.0, params={"command_name": "base_velocity", "std": 0.5}
+        func=mdp.track_ang_vel_z_world_exp, weight=1.2, params={"command_name": "base_velocity", "std": 0.2}
     )
+    # 显式惩罚偏航角速度：exp 核对 0.1~0.3 rad/s 的缓慢打转惩罚太弱
+    ang_vel_z_l2 = RewTerm(func=mdp.ang_vel_z_l2, weight=-1.0)
+    heading_error_l2 = RewTerm(func=mdp.heading_error_l2, weight=-1.5)
+    lateral_drift_l2 = RewTerm(func=mdp.lateral_drift_l2, weight=-0.8)
+    forward_progress = RewTerm(func=mdp.forward_progress, weight=0.4, params={"max_speed": 0.6})
     feet_air_time = RewTerm(
         func=mdp.feet_air_time_positive_biped,
-        weight=0.75,
+        weight=0.5,
         params={
             "command_name": "base_velocity",
             "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*ANKLE.*"),
-            "threshold": 0.25,                      # ← 0.4 → 0.25
+            "threshold": 0.2,
         },
     )
     feet_slide = RewTerm(
@@ -248,10 +257,16 @@ class RewardsCfg:
         weight=-1.0,
         params={"asset_cfg": SceneEntityCfg("robot", joint_names=[".*HIP.*", ".*KNEE.*", ".*ANKLE.*"])},
     )
-    joint_deviation_hip = RewTerm(
+    # 髋外展（roll）单独加重：此前与 yaw 合并、权重 -0.1，双腿大角度外展几乎无代价
+    joint_deviation_hip_roll = RewTerm(
+        func=mdp.joint_deviation_l1,
+        weight=-0.5,
+        params={"asset_cfg": SceneEntityCfg("robot", joint_names=[".*HIP_ROLL.*"])},
+    )
+    joint_deviation_hip_yaw = RewTerm(
         func=mdp.joint_deviation_l1,
         weight=-0.1,
-        params={"asset_cfg": SceneEntityCfg("robot", joint_names=[".*HIP_YAW.*", ".*HIP_ROLL.*"])},
+        params={"asset_cfg": SceneEntityCfg("robot", joint_names=[".*HIP_YAW.*"])},
     )
     joint_deviation_arms = RewTerm(
         func=mdp.joint_deviation_l1,
@@ -276,12 +291,12 @@ class RewardsCfg:
     )
     both_feet_airborne = RewTerm(
         func=mdp.both_feet_airborne_penalty,
-        weight=-0.5,
+        weight=-1.0,                                # ← -0.5 → -1.0：弹跳步是"双脚腾空"，需加强压制
         params={"sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*ANKLE.*")},
     )
     base_height_l2 = RewTerm(
         func=mdp.base_height_l2,
-        weight=-0.3,                                # ← -1.0 → -0.3
+        weight=-0.5,
         params={"target_height": 0.87},
     )
     knee_bend = RewTerm(
@@ -296,24 +311,36 @@ class RewardsCfg:
     )
     gait_leg_tracking = RewTerm(
         func=mdp.track_gait_leg_joints_exp,
-        weight=1.8,                                 # ← 1.2 → 1.8
-        params={"std": 0.2, "period_s": 0.9, "command_name": "base_velocity"},   # ← std 0.5 → 0.2
+        weight=0.3,                                 # ← 1.8 → 0.3：第一阶段先走直，步态后置
+        # std 0.2 → 0.5：std 过小会让 exp 饱和（实测该项长期恒为 0、无梯度）
+        params={"std": 0.5, "period_s": 0.9, "command_name": "base_velocity"},
     )
     gait_arm_tracking = RewTerm(
         func=mdp.track_gait_arm_joints_exp,
-        weight=0.8,                                 # ← 0.5 → 0.8
-        params={"std": 0.2, "period_s": 0.9, "command_name": "base_velocity"},   # ← std 0.4 → 0.2
+        weight=0.08,                                # ← 0.4 × 0.2
+        params={"std": 0.2, "period_s": 0.9, "command_name": "base_velocity"},
     )
-    # ---- 新增：摆动相抬脚高度 ----
+    # ---- 摆动相抬脚高度（第一阶段降权，避免与直走抢梯度）----
     foot_clearance = RewTerm(
         func=mdp.foot_clearance,
-        weight=0.5,
+        weight=0.1,                                 # ← 0.5 × 0.2
         params={
             "target_height": 0.08,
             "std": 0.03,
+            "period_s": 0.9,
             "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*ANKLE.*"),
             "asset_cfg": SceneEntityCfg("robot", body_names=".*ANKLE.*"),
         },
+    )
+    gait_contact = RewTerm(
+        func=mdp.gait_contact_schedule_reward,
+        weight=0.12,                                # ← 0.6 × 0.2
+        params={"period_s": 0.9, "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*ANKLE.*")},
+    )
+    double_support = RewTerm(
+        func=mdp.double_support_penalty,
+        weight=-0.1,                                # ← -0.5 × 0.2
+        params={"period_s": 0.9, "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*ANKLE.*")},
     )
 
 @configclass
@@ -340,7 +367,9 @@ class CurriculumCfg:
     pass
 @configclass
 class VelocityEnvCfg(ManagerBasedRLEnvCfg):
-    scene: SceneCfg = SceneCfg(num_envs=4096, env_spacing=2.5)
+    # 单轮采样耗时（num_steps_per_env=24 × 256 环境）默认约 0.75 s；
+    # 命令行传 --num_envs 会覆盖此默认值
+    scene: SceneCfg = SceneCfg(num_envs=256, env_spacing=2.5)
     observations: ObservationsCfg = ObservationsCfg()
     actions: ActionsCfg = ActionsCfg()
     commands: CommandsCfg = CommandsCfg()
@@ -351,7 +380,7 @@ class VelocityEnvCfg(ManagerBasedRLEnvCfg):
 
     def __post_init__(self):
         self.decimation = 4
-        self.episode_length_s = 50.0   #← 20.0 → 50.0
+        self.episode_length_s = 45.0   # 0.5 m/s × 40 s = 20 m，留 5 s 余量
         self.sim.dt = 0.005
         self.sim.render_interval = self.decimation
         self.sim.physics_material = self.scene.terrain.physics_material

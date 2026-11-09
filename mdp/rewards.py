@@ -68,6 +68,12 @@ def track_ang_vel_z_world_exp(
     return torch.exp(-ang_vel_error / std**2)
 
 
+def ang_vel_z_l2(env, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot")) -> torch.Tensor:
+    """惩罚世界系偏航角速度，用于抑制原地/绕圈打转（exp 核在低速时惩罚过弱）。"""
+    asset = env.scene[asset_cfg.name]
+    return torch.square(asset.data.root_ang_vel_w[:, 2])
+
+
 def stand_still_joint_deviation_l1(
     env, command_name: str, command_threshold: float = 0.06, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot")
 ) -> torch.Tensor:
@@ -80,6 +86,58 @@ def both_feet_airborne_penalty(env, sensor_cfg: SceneEntityCfg) -> torch.Tensor:
     contacts = contact_sensor.data.net_forces_w[:, sensor_cfg.body_ids, :].norm(dim=-1) > 1.0
     both_airborne = torch.sum(contacts.int(), dim=1) == 0
     return both_airborne.float()
+
+
+def _foot_contact_mask(env, sensor_cfg: SceneEntityCfg) -> torch.Tensor:
+    """脚部触地判定（接触力历史最大值 > 1 N），返回 (N, num_feet)。"""
+    contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
+    forces = contact_sensor.data.net_forces_w_history[:, :, sensor_cfg.body_ids, :].norm(dim=-1)
+    return forces.max(dim=1)[0] > 1.0
+
+
+def _lr_indices(names: list[str]) -> tuple[int, int]:
+    """在脚 body 名字列表里定位左/右脚；命名不含 _L/_R 时退回按列表顺序。"""
+    upper = [n.upper() for n in names]
+    left = next((i for i, n in enumerate(upper) if n.endswith("_L") or "LEFT" in n), None)
+    right = next((i for i, n in enumerate(upper) if n.endswith("_R") or "RIGHT" in n), None)
+    if left is None or right is None:
+        return 0, 1
+    return left, right
+
+
+def gait_contact_schedule_reward(
+    env,
+    period_s: float = 0.9,
+    sensor_cfg: SceneEntityCfg = SceneEntityCfg("contact_forces", body_names=".*ANKLE.*"),
+) -> torch.Tensor:
+    """要求每只脚的触地状态与步态相位一致，返回左右匹配比例（0~1）。
+
+    相位处于支撑相（<0.6）的脚必须触地、处于摆动相的脚必须离地。
+    弹跳式前进（双脚同时蹬地 / 同时腾空）时最多只能对上一只脚，奖励封顶 0.5，
+    因此该项可直接压制 rabbit-hop 局部最优。
+    """
+    contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
+    in_contact = _foot_contact_mask(env, sensor_cfg)
+    l, r = _lr_indices([contact_sensor.body_names[i] for i in sensor_cfg.body_ids])
+    desired = gait.contact_schedule(env, period_s=period_s)  # [左脚, 右脚]
+    match_l = (in_contact[:, l] == desired[:, 0]).float()
+    match_r = (in_contact[:, r] == desired[:, 1]).float()
+    return 0.5 * (match_l + match_r)
+
+
+def double_support_penalty(
+    env,
+    period_s: float = 0.9,
+    sensor_cfg: SceneEntityCfg = SceneEntityCfg("contact_forces", body_names=".*ANKLE.*"),
+) -> torch.Tensor:
+    """相位只应单脚支撑时，若双脚同时触地则给 0/1 惩罚（反“滑步/蹭地”）。"""
+    contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
+    in_contact = _foot_contact_mask(env, sensor_cfg)
+    l, r = _lr_indices([contact_sensor.body_names[i] for i in sensor_cfg.body_ids])
+    desired = gait.contact_schedule(env, period_s=period_s)
+    both_contact = in_contact[:, l] & in_contact[:, r]
+    expect_single = desired[:, 0] != desired[:, 1]
+    return (both_contact & expect_single).float()
 
 
 def base_height_l2(env, target_height: float, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot")) -> torch.Tensor:
@@ -349,8 +407,12 @@ def track_gait_leg_joints_exp(
     asset = env.scene[asset_cfg.name]
     joint_ids, _ = asset.find_joints(gait.LEG_JOINT_NAMES, preserve_order=True)
     targets = gait.leg_joint_targets(env, period_s=period_s, command_name=command_name)
-    error = torch.sum(torch.square(targets - asset.data.joint_pos[:, joint_ids]), dim=1)
-    return torch.exp(-error / std**2)
+    error = torch.square(targets - asset.data.joint_pos[:, joint_ids])  # (N, 6)
+    # 左右腿分开求均值：6 关节求和会让 exp 在初期直接饱和（奖励恒 0 无梯度），
+    # 且单条腿不跟踪时其误差会被另一条腿摊薄
+    err_l = error[:, :3].mean(dim=1)
+    err_r = error[:, 3:].mean(dim=1)
+    return 0.5 * (torch.exp(-err_l / std**2) + torch.exp(-err_r / std**2))
 
 
 def track_gait_arm_joints_exp(
@@ -375,19 +437,29 @@ def foot_clearance(
     env,
     target_height: float = 0.08,
     std: float = 0.03,
+    period_s: float = 0.9,
     sensor_cfg: SceneEntityCfg = SceneEntityCfg("contact_forces", body_names=".*ANKLE.*"),
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot", body_names=".*ANKLE.*"),
 ) -> torch.Tensor:
     """奖励摆动脚达到目标离地高度（对抗拖脚）。
 
-    接触判定用接触力 > 1.0 N；仅在非接触（摆动相）时给奖励，
-    避免把支撑脚也纳入。地面为平面 z≈0，直接取 body z 作为离地高度。
+    只在"该相位应处于摆动相"的那只脚上生效：否则双脚同时腾空的弹跳步
+    也能白拿该项奖励，反而助推 rabbit-hop。地面为平面，直接取 body z 作为离地高度。
     """
     contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
-    in_contact = (
-        contact_sensor.data.net_forces_w[:, sensor_cfg.body_ids, :].norm(dim=-1) > 1.0
-    )  # (N, num_feet) bool
+    in_contact = _foot_contact_mask(env, sensor_cfg)  # (N, num_feet) bool
     asset = env.scene[asset_cfg.name]
-    foot_z = asset.data.body_pos_w[:, asset_cfg.body_ids, 2]   # (N, num_feet)
-    reward = torch.exp(-((foot_z - target_height) ** 2) / std ** 2) * (~in_contact).float()
+    foot_z = asset.data.body_pos_w[:, asset_cfg.body_ids, 2]  # (N, num_feet)
+
+    desired = gait.contact_schedule(env, period_s=period_s)  # [左脚, 右脚]
+    l_a, r_a = _lr_indices([asset.body_names[i] for i in asset_cfg.body_ids])
+    l_s, r_s = _lr_indices([contact_sensor.body_names[i] for i in sensor_cfg.body_ids])
+    swing = torch.zeros_like(in_contact)
+    swing[:, l_a] = ~desired[:, 0]
+    swing[:, r_a] = ~desired[:, 1]
+    touching = torch.zeros_like(in_contact)
+    touching[:, l_a] = in_contact[:, l_s]
+    touching[:, r_a] = in_contact[:, r_s]
+
+    reward = torch.exp(-((foot_z - target_height) ** 2) / std ** 2) * (~touching & swing).float()
     return reward.mean(dim=1)
